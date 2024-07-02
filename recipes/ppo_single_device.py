@@ -851,6 +851,8 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
                         self._optimizer.step()
                         self._optimizer.zero_grad()
+
+                        self.global_step += 1
                         losses.append(running_loss.item())
                         policy_losses.append(running_policy_loss.item())
                         value_losses.append(running_vf_loss.item())
@@ -881,7 +883,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                 log_dict,
                 step=self.global_step,
             )
-            self.global_step += 1
             self.kl_controller.update(kl.sum(1).mean().item(), curr_epoch)
 
             with torch.no_grad():
