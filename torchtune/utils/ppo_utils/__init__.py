@@ -22,11 +22,13 @@ from .rewards import (
     masked_whiten,
     whiten,
 )
+from .sequence_processing import truncate_sequence_at_first_stop_token
 
 __all__ = [
     "generate",
     "generate_next_token",
     "generate_next_token_with_value_head_model",
+    "truncate_sequence_at_first_stop_token",
     "get_causal_mask",
     "sample",
     "update_stop_tokens_tracker",

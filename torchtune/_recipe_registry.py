@@ -167,6 +167,28 @@ _ALL_RECIPES = [
         supports_distributed=False,
     ),
     Recipe(
+        name="ppo_single_device",
+        file_path="ppo_single_device.py",
+        configs=[
+            Config(
+                name="mistral/7B_lora_ppo",
+                file_path="mistral/7B_lora_ppo.yaml",
+            ),
+        ],
+        supports_distributed=False,
+    ),
+    Recipe(
+        name="ppo_single_device_backup",
+        file_path="ppo_single_device_backup.py",
+        configs=[
+            Config(
+                name="mistral/7B_lora_ppo",
+                file_path="mistral/7B_lora_ppo.yaml",
+            ),
+        ],
+        supports_distributed=False,
+    ),
+    Recipe(
         name="lora_finetune_distributed",
         file_path="lora_finetune_distributed.py",
         configs=[

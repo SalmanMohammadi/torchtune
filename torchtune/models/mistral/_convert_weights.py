@@ -23,6 +23,7 @@ _MISTRAL_REWARD = {
     "model.layers.{}.post_attention_layernorm.weight": "layers.{}.mlp_norm.scale",
     "model.norm.weight": "norm.scale",
     "score.weight": "output.weight",
+    "score.bias": "output.bias",
 }
 
 _FROM_HF_LM = {
@@ -74,11 +75,7 @@ def mistral_reward_hf_to_tune(
         head_dim = dim // num_heads
 
     def _permute(t, n_heads):
-        return (
-            t.view(n_heads, 2, head_dim // 2, dim)
-            .transpose(1, 2)
-            .reshape((head_dim * n_heads), dim)
-        )
+        return t.view(n_heads, 2, head_dim // 2, dim).transpose(1, 2).reshape((head_dim * n_heads), dim)
 
     for key, value in state_dict.items():
         if "rotary_emb.inv_freq" not in key:  # Skip loading the position embeddings
@@ -119,11 +116,7 @@ def mistral_reward_tune_to_hf(
     head_dim = dim // num_heads
 
     def _permute(t, n_heads):
-        return (
-            t.view(n_heads, head_dim // 2, 2, dim)
-            .transpose(1, 2)
-            .reshape((head_dim * n_heads), dim)
-        )
+        return t.view(n_heads, head_dim // 2, 2, dim).transpose(1, 2).reshape((head_dim * n_heads), dim)
 
     for key, value in state_dict.items():
         new_key = get_mapped_key(key, inverted_mapping_dict)
@@ -167,11 +160,7 @@ def hf_to_tune_lm(
         head_dim = dim // num_heads
 
     def _permute(t, n_heads):
-        return (
-            t.view(n_heads, 2, head_dim // 2, dim)
-            .transpose(1, 2)
-            .reshape((head_dim * n_heads), dim)
-        )
+        return t.view(n_heads, 2, head_dim // 2, dim).transpose(1, 2).reshape((head_dim * n_heads), dim)
 
     for key, value in state_dict.items():
         if "rotary_emb.inv_freq" not in key:  # Skip loading the position embeddings
@@ -209,11 +198,7 @@ def tune_to_hf_lm(
     head_dim = dim // num_heads
 
     def _permute(t, n_heads):
-        return (
-            t.view(n_heads, head_dim // 2, 2, dim)
-            .transpose(1, 2)
-            .reshape((head_dim * n_heads), dim)
-        )
+        return t.view(n_heads, head_dim // 2, 2, dim).transpose(1, 2).reshape((head_dim * n_heads), dim)
 
     for key, value in state_dict.items():
         new_key = get_mapped_key(key, inverted_mapping_dict)

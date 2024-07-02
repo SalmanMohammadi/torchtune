@@ -22,8 +22,8 @@ def generate_next_token(
     """Generates the next tokens."""
     # model produces logits in [bsz, seq_length, vocab_size]
     # we want to take the last token's logits as the input to the next model call
-    logits = model(x, input_pos=input_pos, mask=mask)[:, -1]
-    return sample(logits, temperature, top_k)
+    logits = model(x, input_pos=input_pos, mask=mask)
+    return logits, sample(logits[:, -1], temperature, top_k)
 
 
 def generate_next_token_with_value_head_model(
@@ -39,7 +39,7 @@ def generate_next_token_with_value_head_model(
     # model produces logits in [bsz, seq_length, vocab_size]
     # we want to take the last token's logits as the input to the next model call
     logits, _ = model(x, input_pos=input_pos, mask=mask)
-    return sample(logits[:, -1], temperature, top_k)
+    return logits, sample(logits[:, -1], temperature, top_k)
 
 
 def get_causal_mask(
@@ -59,9 +59,7 @@ def get_causal_mask(
         torch.Tensor: Boolean causal mask with shape [bsz x seq_length x seq_length]
     """
     _, seq_len = padding_mask.shape
-    mask = torch.tril(
-        torch.ones(seq_len, seq_len, device=padding_mask.device, dtype=bool), diagonal=0
-    )
+    mask = torch.tril(torch.ones(seq_len, seq_len, device=padding_mask.device, dtype=bool), diagonal=0)
     mask = mask & (padding_mask[:, None, :] & padding_mask[:, :, None])
     mask.diagonal(dim1=1, dim2=2)[:] = True
     return mask
@@ -78,7 +76,6 @@ def generate(
     top_k=None,
     stop_tokens=None,
     custom_generate_next_token=None,
-    dtype: torch.dtype = torch.float32,
 ):
     """
     Generates tokens from a model conditioned on a prompt. In contrast to ~torchtune.utils._generation.generate~,
@@ -116,20 +113,16 @@ def generate(
 
     bsz, prompt_length = prompt.size()
     generated_tokens = prompt.clone()
-    generated_tokens[generated_tokens == pad_id] = 0
+    # generated_tokens[generated_tokens == pad_id] = 0
 
     if stop_tokens is not None:
         # convert stop tokens to tensor for easy matching
-        stop_tokens = (
-            torch.tensor(stop_tokens, device=prompt.device) if stop_tokens else None
-        )
+        stop_tokens = torch.tensor(stop_tokens, device=prompt.device) if stop_tokens else None
         # keeps track at a high level if we've already hit a stop token in a sequence so we can early stop
         stop_token_reached = torch.zeros(bsz, dtype=torch.bool, device=prompt.device)
         # everything in stop_token_mask starts as 1s, and we'll set them to 0 for sequences
         # that already hit a stop token
-        stop_token_mask = torch.ones(
-            (bsz, prompt_length), dtype=torch.int32, device=prompt.device
-        )
+        stop_token_mask = torch.ones((bsz, prompt_length), dtype=torch.int32, device=prompt.device)
 
     if custom_generate_next_token is None:
         custom_generate_next_token = generate_next_token
@@ -139,22 +132,19 @@ def generate(
         # by appending the logical not of stop_token_reached to the end of the mask
         # reshaped to be bsz first
         if stop_tokens is not None:
-            stop_token_mask = torch.cat(
-                [stop_token_mask, ~stop_token_reached.reshape(bsz, 1)], dim=-1
-            )
+            stop_token_mask = torch.cat([stop_token_mask, ~stop_token_reached.reshape(bsz, 1)], dim=-1)
 
         padding_masks = generated_tokens == pad_id
         if padding_masks.any():
             mask = get_causal_mask(~padding_masks)
             input_pos = (~padding_masks).cumsum(-1) - (~padding_masks).long()
-            input_pos = input_pos.to(device=generated_tokens.device, dtype=torch.int)
+            # print(f"iter {i}, input_pos: {input_pos}")
+            input_pos = input_pos.to(torch.int)
         else:
             mask = None
-            input_pos = torch.arange(
-                0, prompt_length + i, device=generated_tokens.device
-            )
+            input_pos = torch.arange(0, prompt_length + i, device=generated_tokens.device)
 
-        tokens = custom_generate_next_token(
+        logits, tokens = custom_generate_next_token(
             model,
             input_pos=input_pos,
             x=generated_tokens,
@@ -166,17 +156,8 @@ def generate(
         generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
 
         if stop_tokens is not None:
-            stop_token_reached = update_stop_tokens_tracker(
-                tokens, stop_tokens, stop_token_reached
-            )
+            stop_token_reached = update_stop_tokens_tracker(tokens, stop_tokens, stop_token_reached)
             if stop_token_reached.all().item():
                 break
 
-    # mask out generated tokens in seqs that already hit a stop token
-    if stop_tokens is not None:
-        generated_tokens = generated_tokens * stop_token_mask
-        # if pad_id is not 0, replace 0 with pad_id
-        if pad_id != 0:
-            generated_tokens[generated_tokens == 0] = pad_id
-
-    return generated_tokens
+    return generated_tokens, logits

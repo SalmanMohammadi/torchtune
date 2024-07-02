@@ -55,7 +55,7 @@ from .memory import (  # noqa
     register_optim_in_bwd_hooks,
     set_activation_checkpointing,
 )
-from .pooling import get_last_non_masked_token
+from .pooling import get_last_unmasked_token_idx
 
 from .precision import (
     get_dtype,
@@ -82,7 +82,7 @@ __all__ = [
     "get_full_finetune_fsdp_wrap_policy",
     "padded_collate",
     "padded_collate_dpo",
-    "get_last_non_masked_token",
+    "get_last_unmasked_token_idx",
     "set_activation_checkpointing",
     "set_default_dtype",
     "set_seed",

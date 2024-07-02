@@ -52,7 +52,7 @@ class TextCompletionDataset(Dataset):
 
     def _prepare_sample(self, sample: Mapping[str, Any]) -> Dict[str, List[int]]:
         prompt = sample[self._column]
-        tokens = self._tokenizer.encode(text=prompt, add_bos=True, add_eos=True)
+        tokens = self._tokenizer.encode(text=prompt, add_bos=True, add_eos=False)
 
         # Truncate if needed, but don't coerce EOS id
         if self.max_seq_len is not None:

@@ -47,21 +47,21 @@ class TestGenerate:
         return torch.cat([torch.tensor([0, 0]), torch.arange(2, 10)])
 
     @pytest.fixture
-    def prompt_tokens_batched_padded(self):
+    def prompt_tokens_batched_left_padded(self):
         """
         Pytest fixture to create a list of left-padded batched prompt tokens for testing.
         """
         return torch.cat([torch.tensor([0, 0]), torch.arange(2, 10)]).repeat(3, 1)
 
     @pytest.fixture
-    def prompt_tokens_batched(self):
-        return torch.arange(2, 10).repeat(3, 1)
+    def prompt_tokens_batched_right_padded(self):
+        return torch.cat([torch.arange(2, 10), torch.tensor([0, 0])]).repeat(3, 1)
 
     def test_reproducability_with_and_without_padding_batched(
         self,
         generation_model,
-        prompt_tokens_batched_padded,
-        prompt_tokens_batched,
+        prompt_tokens_batched_left_padded,
+        prompt_tokens_batched_right_padded,
     ):
         """
         Test to check if the `generate` function produces the same output for inputs that are left padded
@@ -73,7 +73,7 @@ class TestGenerate:
         torch.manual_seed(42)
         outputs = ppo_utils.generate(
             model=generation_model,
-            prompt=prompt_tokens_batched_padded,
+            prompt=prompt_tokens_batched_left_padded,
             max_generated_tokens=10,
             temperature=temperature,
             top_k=top_k,
@@ -82,14 +82,16 @@ class TestGenerate:
         torch.manual_seed(42)
         expected_outputs = ppo_utils.generate(
             model=generation_model,
-            prompt=prompt_tokens_batched,
+            prompt=prompt_tokens_batched_right_padded,
             max_generated_tokens=10,
             temperature=temperature,
             top_k=top_k,
         )
 
-        print(outputs[:, 2:], expected_outputs)
-        torch.testing.assert_close(outputs[:, 2:], expected_outputs, atol=0, rtol=0)
+        not_padded_idxs = list(range(8)) + list(range(10, 20))
+        torch.testing.assert_close(
+            outputs[:, 2:], expected_outputs[:, not_padded_idxs], atol=0, rtol=0
+        )
 
     def test_reproducability_with_and_without_padding(
         self, generation_model, prompt_tokens, prompt_tokens_padded

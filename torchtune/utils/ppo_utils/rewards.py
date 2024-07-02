@@ -14,6 +14,7 @@ def get_rewards(
     logprobs: torch.Tensor,
     ref_logprobs: torch.Tensor,
     kl_controller_value: float,
+    valid_score_idxs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Calculates the rewards for the given scores, logprobs, and reference logprobs.
@@ -23,6 +24,9 @@ def get_rewards(
         logprobs (torch.Tensor): Policy logprobs, shape (b, reponse_len).
         ref_logprobs (torch.Tensor): Reference base model, shape (b, reponse_len).
         kl_controller_value (float): Adaptive KL controller value.
+        valid_score_idxs (torch.Tensor, optional): A tensor of indexes for valid (non-padded) token predictions.
+            This is useful when calculating rewards for padded sequences, as scores and value estimates are defined
+            for the last valid predicted token. Shape: (b,).
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple of three tensors with shape [b, response_len] each:
@@ -44,9 +48,12 @@ def get_rewards(
 
     total_reward = kl_reward.clone()
 
-    # adding reward to kl at final position
+    # adding reward to kl at final valid position
     # https://github.com/openai/lm-human-preferences/blob/cbfd210bb8b08f6bc5c26878c10984b90f516c66/lm_human_preferences/train_policy.py#L153
-    total_reward[:, -1] += scores
+    if valid_score_idxs is not None:
+        total_reward[torch.arange(scores.shape[0], device=scores.device), valid_score_idxs] += scores
+    else:
+        total_reward[:, -1] += scores
 
     return total_reward, kl, kl_reward
 
@@ -62,42 +69,36 @@ def whiten(x: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
         torch.Tensor: The whitened tensor.
     """
     mean, var = x.mean(), x.var()
-    print(f"func mean: {mean}, var: {var}")
     whitened = (x - mean) * torch.rsqrt(var + 1e-8)
     if shift_mean:
         whitened += mean
     return whitened
 
 
-def masked_mean(
-    values: torch.Tensor, mask: torch.Tensor, dim: Optional[int] = None
-) -> torch.Tensor:
+def masked_mean(x: torch.Tensor, mask: torch.Tensor, dim: Optional[int] = None) -> torch.Tensor:
     """
-    Compute mean of tensor with a masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
+    Compute mean of tensor with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
 
     Args:
-        values (torch.Tensor): The input tensor.
-        mask (torch.Tensor): The bool mask tensor, where True indicates the value should be masked.
+        x (torch.Tensor): The input tensor.
+        mask (torch.Tensor): The bool mask tensor, where True indicates the corresponding value in `x`
+            should participate in the mean calculation.
         dim (int): The axis to calculate the mean over.
 
     Returns:
         torch.Tensor: The mean tensor.
     """
-    if dim is not None:
-        return (values * mask).sum(dim=dim) / mask.sum(dim=dim)
-    else:
-        return (values * mask).sum() / mask.sum()
+    return (x * mask).sum(dim=dim) / mask.sum(dim=dim)
 
 
-def masked_var(
-    x: torch.Tensor, mask: torch.Tensor, unbiased: bool = True
-) -> torch.Tensor:
+def masked_var(x: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
     """
     Compute variance of tensor with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
 
     Args:
         x (torch.Tensor): The input tensor.
-        mask (torch.Tensor): The mask tensor.
+        mask (torch.Tensor): The bool mask tensor, where True indicates the corresponding value in `x`
+            should participate in the mean calculation.
         unbiased (bool): Whether to use the unbiased variance.
 
     Returns:
@@ -123,14 +124,13 @@ def masked_var(
     return var
 
 
-def masked_whiten(
-    x: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True
-) -> torch.Tensor:
+def masked_whiten(x: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
     """
     Whiten (normalises) values with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
     Args:
         x (torch.Tensor): The input tensor.
-        mask (torch.Tensor): The bool mask tensor, where True indicates the value should be masked.
+        mask (torch.Tensor): The bool mask tensor, where True indicates the corresponding value in `x`
+            should participate in the mean calculation.
         shift_mean (bool): Whether to shift normalised values by the mean.
 
     Returns:
@@ -160,9 +160,8 @@ def estimate_advantages(
         rewards (torch.Tensor): The rewards received at each time step. Shape: (b, reponse_len)
         gamma (float): The discount factor.
         lmbda (float): The GAE-Lambda parameter.
-        masks (torch.Tensor, optional): A boolean tensor used to correctly calculate means during whitening
-            for masked values/rewards. True indicates the value should be masked. Shape: (b, reponse_len)
-
+        masks (torch.Tensor, optional): A bool mask tensor, where True indicates the corresponding value in `values`
+            should participate in the mean calculation.
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: A tuple containing the estimated advantages and returns.
             - advantages (torch.Tensor): The estimated advantages. Shape: (b, reponse_len)

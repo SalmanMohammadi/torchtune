@@ -79,16 +79,12 @@ class TransformerDecoderWithHiddenOutput(nn.Module):
 
         # causal_mask is used during inference to ensure we're attending
         # to the right tokens
-        self.causal_mask = torch.tril(
-            torch.ones(self.max_seq_len, self.max_seq_len, dtype=torch.bool)
-        )
+        self.causal_mask = torch.tril(torch.ones(self.max_seq_len, self.max_seq_len, dtype=torch.bool))
 
     def reset_caches(self):
         """Reset the key value caches."""
         if self.layers[0].attn.kv_cache is None:
-            raise RuntimeError(
-                "Key value caches are not setup. Call ``setup_caches()`` first."
-            )
+            raise RuntimeError("Key value caches are not setup. Call ``setup_caches()`` first.")
 
         for layer in self.layers:
             layer.attn.kv_cache.reset()
@@ -131,13 +127,9 @@ class TransformerDecoderWithHiddenOutput(nn.Module):
 
         if self.causal_mask is not None:
             if input_pos is None:
-                raise ValueError(
-                    "Caches are setup, but the position of input token is missing"
-                )
+                raise ValueError("Caches are setup, but the position of input token is missing")
             if mask is not None:
-                raise ValueError(
-                    "An attention mask was set. Cannot use a non-causal mask for inference"
-                )
+                raise ValueError("An attention mask was set. Cannot use a non-causal mask for inference")
             # shape: [1, input_pos_len, m_s]
             # in most cases input_pos_len should be 1
             mask = self.causal_mask[None, input_pos]
@@ -211,9 +203,7 @@ class TransformerLM(nn.Module):
     Transformer Decoder identical to :class:`~torchtune.modules.TransformerDecoder`
     """
 
-    def __init__(
-        self, decoder: TransformerDecoderWithHiddenOutput, output: nn.Linear
-    ) -> None:
+    def __init__(self, decoder: TransformerDecoderWithHiddenOutput, output: nn.Linear) -> None:
         super().__init__()
         self.decoder = decoder
         self.output = output
@@ -256,3 +246,45 @@ class TransformerLM(nn.Module):
         lm_output = self.output(h).float()
 
         return lm_output
+
+
+class TransformerActorCritic(nn.Module):
+    def __init__(self, actor: nn.Module, critic: nn.Module) -> None:
+        super().__init__()
+        self.actor = actor
+        self.critic = critic
+
+    def forward(
+        self,
+        tokens: Tensor,
+        *,
+        input_pos: Optional[Tensor] = None,
+        mask: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Args:
+            tokens (Tensor): input tensor with shape [b x s]
+            input_pos (Optional[Tensor]): Optional tensor which contains the position
+                of the current token. This is only used during inference. Default is None
+
+        Note: At the very first step of inference, when the model is provided with a prompt,
+        ``input_pos`` would contain the positions of all of the tokens in the prompt
+        (eg: ``torch.arange(prompt_length)``). This is because we will need to compute the
+        KV values for each position.
+
+        Returns:
+            Tuple[Tensor, Tensor]: Tuple of tensors with shape ([b x s x v], [b x s x 1]))
+
+        Raises:
+            ValueError: if causal_mask is set but input_pos is None
+
+        Notation used for tensor shapes:
+            - b: batch size
+            - s: sequence length
+            - v: vocab size
+            - d: embed dim
+            - m_s: max seq len
+        """
+        policy_output = self.actor(tokens, input_pos=input_pos, mask=mask)
+        value_output = self.critic(tokens, input_pos=input_pos, mask=mask)
+        return policy_output, value_output
