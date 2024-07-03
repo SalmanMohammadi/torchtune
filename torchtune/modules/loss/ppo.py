@@ -91,13 +91,19 @@ class PPOLoss(nn.Module):
         # print(f"policy_losses unclipped no masked mean: {policy_losses_unclipped.mean()}")
         policy_loss = torch.maximum(policy_losses_clipped, policy_losses_unclipped)
         policy_loss = (
-            policy_loss.mean() if padding_masks is None else ppo_utils.masked_mean(policy_loss, padding_masks)
+            policy_loss.mean()
+            if padding_masks is None
+            else ppo_utils.masked_mean(policy_loss, padding_masks)
         )
         # print(f"final policy_loss: {policy_loss}")
         values_clipped = torch.clamp(
-            phi_values, phi_old_values - self.value_clip_range, phi_old_values + self.value_clip_range
+            phi_values,
+            phi_old_values - self.value_clip_range,
+            phi_old_values + self.value_clip_range,
         )
-        value_loss = torch.maximum((phi_values - returns) ** 2, (values_clipped - returns) ** 2)
+        value_loss = torch.maximum(
+            (phi_values - returns) ** 2, (values_clipped - returns) ** 2
+        )
         value_loss = (
             0.5 * value_loss.mean()
             if value_padding_masks is None

@@ -38,9 +38,13 @@ class TestPPOLoss:
         # objective becomes max(-e, -1.2) since advantages is 1
         expected_loss = torch.tensor(-1.2)
 
-        _, policy_loss, _ = loss_fn(pi_old_logprobs, pi_logprobs_high, advantages, values, values, returns)
+        _, policy_loss, _ = loss_fn(
+            pi_old_logprobs, pi_logprobs_high, advantages, values, values, returns
+        )
 
-        torch.testing.assert_close(policy_loss.mean(), expected_loss, atol=1e-4, rtol=1e6)
+        torch.testing.assert_close(
+            policy_loss.mean(), expected_loss, atol=1e-4, rtol=1e6
+        )
 
     def test_policy_loss_clipped_for_low_logprobs(self, loss_fn):
         # fixed old policy logprobs, advantages, returns
@@ -55,9 +59,13 @@ class TestPPOLoss:
         # objective becomes max(1/e, 0.8) since advantages is 1
         expected_loss = torch.tensor(0.8)
 
-        _, policy_loss, _ = loss_fn(pi_old_logprobs, pi_logprobs_low, advantages, values, values, returns)
+        _, policy_loss, _ = loss_fn(
+            pi_old_logprobs, pi_logprobs_low, advantages, values, values, returns
+        )
 
-        torch.testing.assert_close(policy_loss.mean(), expected_loss, atol=1e-4, rtol=1e6)
+        torch.testing.assert_close(
+            policy_loss.mean(), expected_loss, atol=1e-4, rtol=1e6
+        )
 
     def test_policy_loss_not_clipped(self, loss_fn):
         # fixed old policy logprobs, advantages, returns
@@ -71,9 +79,13 @@ class TestPPOLoss:
         # ratio is not clipped since it is within [1-epsilon, 1+epsilon]
         expected_loss = torch.tensor(0.1).exp()
 
-        _, policy_loss, _ = loss_fn(pi_old_logprobs, pi_logprobs_unclipped, advantages, values, values, returns)
+        _, policy_loss, _ = loss_fn(
+            pi_old_logprobs, pi_logprobs_unclipped, advantages, values, values, returns
+        )
 
-        torch.testing.assert_close(policy_loss.mean(), expected_loss, atol=1e-4, rtol=1e6)
+        torch.testing.assert_close(
+            policy_loss.mean(), expected_loss, atol=1e-4, rtol=1e6
+        )
 
     def test_policy_loss_lower_for_higher_advantages(self, loss_fn):
         pi_logprobs = torch.tensor([-0.5, -0.8, -1.2])
@@ -83,8 +95,12 @@ class TestPPOLoss:
         values = torch.tensor([1.0, 1.0, 1.0])
         returns = torch.tensor([1.0, 1.0, 1.0])
 
-        _, policy_loss_low, _ = loss_fn(pi_logprobs, pi_logprobs, advantages_high, values, values, returns)
-        _, policy_loss_high, _ = loss_fn(pi_logprobs, pi_logprobs, advantages_low, values, values, returns)
+        _, policy_loss_low, _ = loss_fn(
+            pi_logprobs, pi_logprobs, advantages_high, values, values, returns
+        )
+        _, policy_loss_high, _ = loss_fn(
+            pi_logprobs, pi_logprobs, advantages_low, values, values, returns
+        )
 
         assert policy_loss_low.mean() < policy_loss_high.mean()
 
@@ -99,8 +115,20 @@ class TestPPOLoss:
         # value estimates are less similar to returns
         values_less_similar = torch.tensor([0.5, 1.5, 2.0])
 
-        _, _, value_loss_lower = loss_fn(pi_logprobs, pi_logprobs, advantages, values_similar, values_similar, returns)
+        _, _, value_loss_lower = loss_fn(
+            pi_logprobs,
+            pi_logprobs,
+            advantages,
+            values_similar,
+            values_similar,
+            returns,
+        )
         _, _, value_loss_higher = loss_fn(
-            pi_logprobs, pi_logprobs, advantages, values_similar, values_less_similar, returns
+            pi_logprobs,
+            pi_logprobs,
+            advantages,
+            values_similar,
+            values_less_similar,
+            returns,
         )
         assert value_loss_lower.mean() < value_loss_higher.mean()

@@ -4,12 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
+import os
 import sys
 
 from functools import partial
-from typing import Any, Dict, Optional, Tuple, List
+from itertools import chain
+from typing import Any, Dict, List, Optional, Tuple
 from warnings import warn
-import os
+
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, ListConfig
@@ -18,20 +21,18 @@ from torch import nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from torchtune import config, modules, utils
-from torchtune.models.mistral.modules.transformer import TransformerActorCritic
 from torchtune.datasets import ConcatDataset
-from itertools import chain
+from torchtune.models.mistral.modules.transformer import TransformerActorCritic
 from torchtune.modules.peft.peft_utils import (
     disable_adapter,
-    get_lora_module_names,
     get_adapter_params,
+    get_lora_module_names,
     get_merged_lora_ckpt,
     set_trainable_params,
     validate_missing_and_unexpected_for_lora,
 )
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.utils import ppo_utils
-import copy
 from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
@@ -437,7 +438,10 @@ class PPORecipeSingleDevice(FTRecipeInterface):
     ) -> Optimizer:
 
         # not sure if chain is necessary?
-        optimizer = config.instantiate(cfg_optimizer, chain(self._model.parameters(), self._value_model.parameters()))
+        optimizer = config.instantiate(
+            cfg_optimizer,
+            chain(self._model.parameters(), self._value_model.parameters()),
+        )
         if opt_state_dict:
             optimizer.load_state_dict(opt_state_dict)
 
@@ -540,7 +544,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
             with self._profiler:
 
-                pbar = tqdm(total=self.num_steps)
+                pbar = tqdm(total=self.total_epochs)
                 batch = next(iter(self._dataloader))
                 if self._profiler_enabled:
                     self._profiler.step()
@@ -640,7 +644,10 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # i'm balancing between comprehensability of algo. design decisions and testability here
 
                     # truncate sequences at the first occurence of eos_id and pad to length
-                    padding_masks, responses = ppo_utils.truncate_sequence_at_first_stop_token(
+                    (
+                        padding_masks,
+                        responses,
+                    ) = ppo_utils.truncate_sequence_at_first_stop_token(
                         responses, self.stop_token_ids, self._tokenizer.pad_id
                     )
                     # padding_masks = responses == self._tokenizer.pad_id
@@ -665,7 +672,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # run reward model on truncated query-response sequences: shape [b, context_length + max_generated_tokens]
                     # TODO (SalmanMohammadi): Add support for _reward_model and _model using different tokenizers
                     scores = self._reward_model(
-                        torch.cat([input_ids, responses], dim=1), input_pos=position_ids, mask=masks
+                        torch.cat([input_ids, responses], dim=1),
+                        input_pos=position_ids,
+                        mask=masks,
                     )
                     import pdb
 
@@ -706,16 +715,25 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     #   trl/trainer/ppov2_trainer.py#L354
                     # and the link to the excalidaw therein for a visual explanation
                     value_seq_idxs = torch.where(
-                        (seq_idxs > 0) & (seq_idxs < self.max_generated_tokens - 1), seq_idxs + 1, seq_idxs
+                        (seq_idxs > 0) & (seq_idxs < self.max_generated_tokens - 1),
+                        seq_idxs + 1,
+                        seq_idxs,
                     )
                     value_padding_masks = padding_masks.clone()
-                    value_padding_masks[torch.arange(batch_size, device=input_ids.device), value_seq_idxs] = False
+                    value_padding_masks[
+                        torch.arange(batch_size, device=input_ids.device),
+                        value_seq_idxs,
+                    ] = False
                     values = values[:, context_length - 1 : -1].squeeze(-1)  # [b, max_generated_tokens]
 
                     values = torch.where(value_padding_masks, 0.0, values)
                     # [b, max_generated_tokens]
                     rewards, kl, kl_rewards = ppo_utils.get_rewards(
-                        scores, logprobs, ref_logprobs, self.kl_controller.value, value_seq_idxs
+                        scores,
+                        logprobs,
+                        ref_logprobs,
+                        self.kl_controller.value,
+                        value_seq_idxs,
                     )
 
                     if self.whiten_rewards:
@@ -755,10 +773,10 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # print("--- inside ppo loop ---")
                     # TODO (SalmanMohammadi): Add support for early stopping
                     # shuffle batch indices every epoch
-                    batch_idxs = torch.randperm(self.batch_size)
+                    batch_idxs = torch.randperm(batch_size)
                     # batch_idxs = torch.arange(self.batch_size)
                     # print(batch_idxs)
-                    for i in range(0, self.batch_size, self.ppo_batch_size):
+                    for i in range(0, batch_size, self.ppo_batch_size):
                         mini_batch_idxs = batch_idxs[i : i + self.ppo_batch_size]
                         # print(mini_batch_idxs)
                         running_loss = 0
@@ -809,7 +827,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
                             pi_logprobs = torch.where(backward_padding_masks, INVALID_LOGPROBS, pi_logprobs)
                             phi_values = self._value_model(
-                                backward_query_responses, input_pos=backward_position_ids, mask=backward_masks
+                                backward_query_responses,
+                                input_pos=backward_position_ids,
+                                mask=backward_masks,
                             )
 
                             phi_values = phi_values[:, context_length - 1 : -1].squeeze(-1)
@@ -932,7 +952,10 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                 seq_idxs = utils.get_last_unmasked_token_idx(padding_masks)
                 print(seq_idxs)
                 print("completion", query_response)
-                print("completion truncated", self._tokenizer.decode(responses.squeeze().tolist()))
+                print(
+                    "completion truncated",
+                    self._tokenizer.decode(responses.squeeze().tolist()),
+                )
 
             # delete values and clear cache
             del (
