@@ -549,6 +549,8 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                 if self._profiler_enabled:
                     self._profiler.step()
 
+                batch_size, context_length = batch.shape
+
                 # generating the current trajectory in inference mode
                 with torch.no_grad():
                     input_ids = batch.to(self._device)
@@ -782,7 +784,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         running_loss = 0
                         running_policy_loss = 0
                         running_vf_loss = 0
-                        for j in range(0, self.ppo_batch_size, self.ppo_backward_batch_size):
+                        for j in range(0, len(mini_batch_idxs), self.ppo_backward_batch_size):
                             backward_batch_idxs = mini_batch_idxs[j : j + self.ppo_backward_batch_size]
 
                             backward_returns = returns[backward_batch_idxs]
