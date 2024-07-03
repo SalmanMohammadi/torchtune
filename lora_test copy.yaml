@@ -88,23 +88,23 @@ output_dir: ./target/dummy/output
 initialise_value_head_from_reward_model: True
 
 # Fine-tuning arguments
-batch_size: 128
+batch_size: 512
 num_steps: 10000
 ppo_epochs: 4
-ppo_batch_size: 64
+ppo_batch_size: 256
 # ppo_backward_batch_size: 8
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 4
 whiten_rewards: False
 compile: False
 
 # Generation arguments
-forward_batch_size: 8
-max_generated_tokens: 53
+forward_batch_size: 64
+max_generated_tokens: 58
 temperature: 0.7
 top_k: null
 
 # Reward masking args
-truncate_after_tokens: 13
+min_response_length: 18
 penalise_no_eos: True
 reward_penalty: -3
 stop_token_ids: [

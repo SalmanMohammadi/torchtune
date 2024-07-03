@@ -83,7 +83,7 @@ class PPOLoss(nn.Module):
         policy_losses_clipped = -advantages * clipped_ratios
         policy_losses_unclipped = -advantages * ratios
         # print(
-        #     f"clipfrac: {ppo_utils.masked_mean((policy_losses_clipped > s
+        #     f"clipfrac: {ppo_ut;ils.masked_mean((policy_losses_clipped > s
         # print(f"policy_losses_clipped: {ppo_utils.masked_mean(policy_losses_clipped, padding_masks)}")
         # print(f"policy_losses_clipped no masked mean: {policy_losses_clipped.mean()}")
         # taking max instead of min to minimise loss

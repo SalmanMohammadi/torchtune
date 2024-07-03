@@ -257,7 +257,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         self.max_generated_tokens = cfg.max_generated_tokens
 
         # reward masking args
-        self.truncate_after_tokens = cfg.truncate_after_tokens
+        self.min_response_length = cfg.min_response_length
         self.penalise_no_eos = cfg.penalise_no_eos
         self.reward_penalty = cfg.reward_penalty
 
@@ -281,7 +281,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         self.stop_token_ids = torch.tensor(stop_token_ids, device=self._device)
         self.total_epochs = self.num_steps // self.batch_size
         # one "step" is an update over a batch of trajectories
-        self._steps_per_epoch = len(self._dataloader) // self.batch_size
+        self._steps_per_epoch = self.num_steps  # len(self._dataloader) // self.batch_size
         self.global_step = self.epochs_run * self._steps_per_epoch
 
         # setup adaptive KL controller
@@ -524,9 +524,13 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             ),
         )
 
+        def repeat_generator(dataloader):
+            while True:
+                yield from dataloader
+
         log.info("Dataset and Sampler are initialized.")
 
-        return sampler, dataloader
+        return sampler, iter(repeat_generator(dataloader))
 
     def train(self) -> None:
         """
@@ -636,10 +640,10 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # i'm balancing between comprehensability of algo. design decisions and testability here
 
                     # truncate sequences at the first occurence of eos_id and pad to length
-                    eos_mask, responses = ppo_utils.truncate_sequence_at_first_stop_token(
+                    padding_masks, responses = ppo_utils.truncate_sequence_at_first_stop_token(
                         responses, self.stop_token_ids, self._tokenizer.pad_id
                     )
-                    padding_masks = responses == self._tokenizer.pad_id
+                    # padding_masks = responses == self._tokenizer.pad_id
                     # eos_mask = torch.isin(query_responses[:, context_length:], self.stop_token_ids)
                     # truncated_responses = torch.where(
                     #     torch.logical_xor(eos_mask.cumsum(-1), eos_mask),
@@ -671,17 +675,20 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     scores = scores[torch.arange(0, batch_size), seq_idxs + context_length].squeeze(-1)
                     # scores = torch.ones_like(scores) * 10
 
-                    reward_penality_mask = torch.zeros_like(scores).to(bool)
+                    reward_penalty_mask = torch.zeros_like(scores).to(bool)
                     # to reviewer - see commment above
                     # - sequences without a EOS ID recieve a score of -1
                     if self.penalise_no_eos:
-                        reward_penality_mask = ~eos_mask.any(-1)
-                    # - sequences with length < truncate_after_tokens recieve a score of -1
-                    if self.truncate_after_tokens is not None:
-                        reward_penality_mask |= ~(eos_mask.cumsum(-1).sum(-1) - 1 <= self.truncate_after_tokens)
+                        reward_penalty_mask = ~padding_masks.any(-1)
+                    # - sequences with length < min_response_length recieve a score of -1
+                    if self.min_response_length is not None:
+                        reward_penalty_mask |= ~(seq_idxs >= self.min_response_length)
 
+                    # for seq_idx, eos_mask_ in zip(seq_idxs, padding_masks):
+                    #     print(eos_mask_.cumsum(-1).sum(-1) - 1)
+                    #     print(seq_idx, ~(eos_mask_.cumsum(-1).sum(-1) - 1 <= self.min_response_length))
                     # see https://arxiv.org/pdf/1909.08593 section 3.1.2
-                    scores = torch.where(reward_penality_mask, self.reward_penalty, scores)
+                    scores = torch.where(reward_penalty_mask, self.reward_penalty, scores)
 
                     print(scores.max(), scores.min(), scores.mean(), scores.std())
                     # import pdb
@@ -724,9 +731,12 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     advantages = torch.where(padding_masks, 0.0, advantages)
 
                     # useful for tracking
-                    num_eos_tokens = (~reward_penality_mask).sum().item()
-                    del eos_mask, seq_idxs, value_seq_idxs, responses
+                    num_eos_tokens = (~reward_penalty_mask).sum().item()
+                    del seq_idxs, value_seq_idxs, responses
 
+                # import pdb
+
+                # pdb.set_trace()
                 # trajectory generated! time to optimise
                 approx_policy_kls = []
                 losses = []
@@ -814,7 +824,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                                 padding_masks=~backward_padding_masks,
                                 value_padding_masks=~backward_value_padding_masks,
                             )
+                            import pdb
 
+                            # pdb.set_trace()
                             loss /= self._gradient_accumulation_steps
                             loss.backward()
                             policy_loss /= self._gradient_accumulation_steps
@@ -912,7 +924,15 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                 # table = wandb.Table(columns=columns, data=data)
                 # self._metric_logger.log("query responses", table, step=self.global_step)
                 # except ImportError:
+                eos_mask, responses = ppo_utils.truncate_sequence_at_first_stop_token(
+                    outputs.clone(), self.stop_token_ids, self._tokenizer.pad_id
+                )
+                padding_masks = responses == self._tokenizer.pad_id
+
+                seq_idxs = utils.get_last_unmasked_token_idx(padding_masks)
+                print(seq_idxs)
                 print("completion", query_response)
+                print("completion truncated", self._tokenizer.decode(responses.squeeze().tolist()))
 
             # delete values and clear cache
             del (

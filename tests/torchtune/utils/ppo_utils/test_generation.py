@@ -100,24 +100,27 @@ class TestGenerate:
         top_k = 100
 
         torch.manual_seed(42)
-        outputs, _ = ppo_utils.generate(
+        from torchtune import utils
+
+        outputs = utils.generate(
             model=generation_model,
             prompt=prompt_tokens_padded,
             max_generated_tokens=10,
             temperature=temperature,
             top_k=top_k,
         )
-
+        print("outputsl;ssdf", outputs)
+        outputs = torch.tensor(outputs)
         torch.manual_seed(42)
         expected_outputs, _ = ppo_utils.generate(
             model=generation_model,
-            prompt=prompt_tokens,
+            prompt=prompt_tokens_padded,
             max_generated_tokens=10,
             temperature=temperature,
             top_k=top_k,
         )
-
-        torch.testing.assert_close(outputs[:, 2:], expected_outputs, atol=0, rtol=0)
+        print(expected_outputs, "osdngf")
+        torch.testing.assert_close(outputs, expected_outputs, atol=0, rtol=0)
 
     def test_stop_tokens(self, generation_model, prompt_tokens):
         """
