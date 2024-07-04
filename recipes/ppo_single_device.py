@@ -605,7 +605,8 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # print(f"logits == gen logits")
                     # exit()
                     # logits = logits[:, context_length - 1 :-1]  # [b, max_generated_tokens, vocab_size]
-                    # logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
+                    # logits = logits[:, context_length - 1 :-1]  # [b, max_generated_tokens, vocab_size]
+                    logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
                     logits /= self.temperature
                     # we only need the logprobs of the generated tokens since these are just used for KL rewards
                     logprobs = torch.gather(
@@ -613,7 +614,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         2,
                         responses.unsqueeze(-1),  # [b, max_generated_tokens, 1]
                     ).squeeze(-1)
-
                     # forward_logprobs = torch.gather(
                     #     F.log_softmax(forward_logits[:, context_length - 1 : -1] / self.temperature, dim=-1),
                     #     2,
@@ -677,8 +677,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         input_pos=position_ids,
                         mask=masks,
                     )
-                    import pdb
-
                     # pdb.set_trace()
                     seq_idxs = utils.get_last_unmasked_token_idx(padding_masks)
                     # shape [b, ]
@@ -734,7 +732,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         self.kl_controller.value,
                         value_seq_idxs,
                     )
-
                     if self.whiten_rewards:
                         # shifting mean is disabled for rewards
                         # https://github.com/huggingface/trl/blob/
