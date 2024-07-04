@@ -144,7 +144,7 @@ loss:
   value_clip_range: 0.2
 
 # Training env
-device: mps
+device: cuda
 
 # Memory management
 enable_activation_checkpointing: False
