@@ -494,8 +494,8 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             )
             outputs.extend(outs)
             logits.extend(logit)
-            # )
-        return outputs, logits
+
+        return torch.stack(outputs), torch.stack(logits)
 
     def _setup_data(
         self, cfg_dataset: DictConfig, shuffle: bool, batch_size: int
@@ -536,6 +536,57 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         log.info("Dataset and Sampler are initialized.")
 
         return sampler, iter(repeat_generator(dataloader))
+
+    # def
+    def generate_trajectory(self, input_ids: torch.Tensor) -> None:
+
+        logprobs = []
+        returns = []
+        advantages = []
+        values = []
+        masks = []
+        position_ids = []
+        padding_masks = []
+        value_padding_masks = []
+        query_responses = []
+        with torch.no_grad():
+            _, context_length = input_ids.shape
+            for batch_start in range(0, self.batch_size, self.forward_batch_size):
+                batch_input_ids = input_ids[batch_start : batch_start + self.forward_batch_size]
+
+                batch_query_responses, logits = ppo_utils.generate(
+                    model=self._model,
+                    prompt=batch_input_ids,
+                    max_generated_tokens=self.max_generated_tokens,
+                    temperature=self.temperature,
+                    top_k=self.top_k,
+                    # disabling truncation since we require some additional logic to handle truncation
+                    stop_tokens=None,
+                    pad_id=self._tokenizer.pad_id,
+                )
+                responses = batch_query_responses[:, context_length:].clone()
+
+            query_response_padding_masks = query_responses == self._tokenizer.pad_id
+            if query_response_padding_masks.any():
+                masks = ppo_utils.get_causal_mask(~(query_response_padding_masks))
+                position_ids = (~query_response_padding_masks).cumsum(-1) - (~query_response_padding_masks).long()
+                position_ids = position_ids.type(torch.int)
+            else:
+                # defer SDPA to handle causal masks
+                masks, position_ids = None, None
+
+            logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
+            logits /= self.temperature
+            # we only need the logprobs of the generated tokens since these are just used for KL rewards
+            logprobs = torch.gather(
+                F.log_softmax(logits, dim=-1),
+                2,
+                responses.unsqueeze(-1),  # [b, max_generated_tokens, 1]
+            ).squeeze(-1)
+
+            del logits
+
+            values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
 
     def train(self) -> None:
         """

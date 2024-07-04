@@ -563,7 +563,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     query_responses = torch.stack(query_responses)
                     responses = query_responses[:, context_length:].clone()
                     logits = torch.stack(logits)
-
                     # print(f"gen_logits shape: {logits.shape}")
                     # print(query_responses.shape)
                     # print(f"---- post generationx ---")
@@ -582,6 +581,10 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         # defer SDPA to handle causal masks
                         masks, position_ids = None, None
 
+                    logit_2 = self._model(query_responses, input_pos=position_ids, mask=masks)
+                    import pdb
+
+                    pdb.set_trace()
                     # print(f"POS ID: {position_ids[0]}")
                     # we only need padding masks for responses from here on
 
@@ -605,7 +608,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # print(f"logits == gen logits")
                     # exit()
                     # logits = logits[:, context_length - 1 :-1]  # [b, max_generated_tokens, vocab_size]
-                    logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
+                    # logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
                     logits /= self.temperature
                     # we only need the logprobs of the generated tokens since these are just used for KL rewards
                     logprobs = torch.gather(
