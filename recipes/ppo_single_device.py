@@ -247,7 +247,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         if self.ppo_batch_size % self._gradient_accumulation_steps != 0:
             raise ValueError(
                 f"ppo_batch_size ({self.ppo_batch_size})  must be "
-                f"exactly divisible by gradient_accumulation_steps ({cfg._gradient_accumulation_steps})."
+                f"exactly divisible by gradient_accumulation_steps ({cfg.gradient_accumulation_steps})."
             )
         self.ppo_backward_batch_size = cfg.ppo_batch_size // self._gradient_accumulation_steps
 
@@ -563,6 +563,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     query_responses = torch.stack(query_responses)
                     responses = query_responses[:, context_length:].clone()
                     logits = torch.stack(logits)
+
                     # print(f"gen_logits shape: {logits.shape}")
                     # print(query_responses.shape)
                     # print(f"---- post generationx ---")
@@ -581,10 +582,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         # defer SDPA to handle causal masks
                         masks, position_ids = None, None
 
-                    logit_2 = self._model(query_responses, input_pos=position_ids, mask=masks)
-                    import pdb
-
-                    pdb.set_trace()
                     # print(f"POS ID: {position_ids[0]}")
                     # we only need padding masks for responses from here on
 
@@ -894,7 +891,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             self.epochs_run += 1
             # self.save_checkpoint(epoch=curr_epoch)
             pbar.update(1)
-            pbar.set_description(f"Step: {curr_epoch+1}| reward: {rewards.sum(1).mean()}")
+            pbar.set_description(f"Epoch: {curr_epoch+1}| reward: {rewards.sum(1).mean()}")
 
             kl = logprobs - ref_logprobs
             log_dict = {
