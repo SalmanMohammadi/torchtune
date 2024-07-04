@@ -993,6 +993,8 @@ def recipe_main(cfg: DictConfig) -> None:
     recipe = PPORecipeSingleDevice(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
+    torch.save(recipe._model.state_dict(), "model.pt")
+    torch.save(recipe._value_model.state_dict(), "model.pt")
     recipe.cleanup()
 
 
