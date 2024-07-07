@@ -1,5 +1,11 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import torch
-from torchtune.utils import ppo_utils
+from torchtune.modules import rlhf
 
 
 class TestTruncateSequenceAtFirstStopToken:
@@ -19,7 +25,7 @@ class TestTruncateSequenceAtFirstStopToken:
                 [2, 2, 2],
             ]
         )
-        eos_mask, truncated_sequences = ppo_utils.truncate_sequence_at_first_stop_token(
+        eos_mask, truncated_sequences = rlhf.truncate_sequence_at_first_stop_token(
             sequences, stop_token_ids, fill_value
         )
 

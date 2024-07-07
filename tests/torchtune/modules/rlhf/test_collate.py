@@ -8,7 +8,7 @@
 
 import torch
 
-from torchtune.utils.ppo_utils import left_padded_collate
+from torchtune.modules.rlhf import left_padded_collate
 
 
 class TestLeftPaddedCollate:

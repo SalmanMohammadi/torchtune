@@ -4,17 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import os
 import sys
-
 from functools import partial
 from itertools import chain
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, NamedTuple, Optional, Tuple
 from warnings import warn
 
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig, ListConfig
 from pkg_resources import packaging
 from torch import nn
@@ -22,24 +19,42 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from torchtune import config, modules, utils
 from torchtune.datasets import ConcatDataset
-from torchtune.models.mistral.modules.transformer import TransformerActorCritic
-from torchtune.modules.peft.peft_utils import (
-    disable_adapter,
-    get_adapter_params,
-    get_lora_module_names,
-    get_merged_lora_ckpt,
-    set_trainable_params,
-    validate_missing_and_unexpected_for_lora,
-)
+from torchtune.modules import rlhf
 from torchtune.recipe_interfaces import FTRecipeInterface
-from torchtune.utils import ppo_utils
 from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
-INVALID_LOGPROBS = 1.0
+
+Trajectory = NamedTuple[
+    "Trajectory",
+    [
+        ("query_responses", torch.Tensor),
+        ("logprobs", torch.Tensor),
+        ("ref_logprobs", torch.Tensor),
+        ("values", torch.Tensor),
+        ("masks", Any[torch.Tensor]),
+        ("position_ids", Any[torch.Tensor]),
+        ("response_padding_masks", torch.Tensor),
+        ("value_padding_masks", torch.Tensor),
+        ("value_seq_idxs", torch.Tensor),
+        ("scores", torch.Tensor),
+    ],
+]
+
+PPOStats = NamedTuple(
+    "PPOStats",
+    [
+        ("loss", []),
+        ("policy_loss", []),
+        ("value_loss", []),
+        ("approx_policy_kl", []),
+        ("ratios", []),
+        ("clipfrac", []),
+    ],
+)
 
 
-class PPORecipeSingleDevice(FTRecipeInterface):
+class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     def __init__(self, cfg: DictConfig) -> None:
 
         self._device = utils.get_device(device=cfg.device)
@@ -78,7 +93,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         contains the following information:
         - Merged weights with key MODEL_KEY
         - Adapter weights with key ADAPTER_KEY
-        - Value head weights with key VALUE_HEAD_KEY
         - Relevant recipe state if training is not complete
 
         Checkpointer will save the merged weights, adapter weights and recipe state in
@@ -98,27 +112,14 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             )
 
         # Move to CPU to avoid a copy on GPU
-        state_dict = {k: v.cpu() for k, v in self._model.state_dict().items()}
-
-        # split off the value head weights
-        value_head_state_dict = {
-            "value_head.weight": state_dict.pop("value_head.weight"),
-            "value_head.bias": state_dict.pop("value_head.bias"),
-        }
-        ckpt_dict.update({utils.VALUE_HEAD_KEY: value_head_state_dict})
+        state_dict = {k: v.cpu() for k, v in self._policy_model.state_dict().items()}
 
         # save base model as usual
-        # Construct the full state dict with LoRA weights merged into base LLM weights
-        merged_state_dict = get_merged_lora_ckpt(
-            state_dict,
-            rank=self._lora_rank,
-            alpha=self._lora_alpha,
-        )
-        ckpt_dict.update({utils.MODEL_KEY: merged_state_dict})
+        ckpt_dict.update({utils.MODEL_KEY: state_dict})
 
         # Construct the adapter weights
         adapter_key_filter = lambda x: x in self.adapter_params
-        adapter_state_dict = {k: v for k, v in self._model.state_dict().items() if adapter_key_filter(k)}
+        adapter_state_dict = {k: v for k, v in self._policy_model.state_dict().items() if adapter_key_filter(k)}
         adapter_config = {
             "r": self._lora_rank,
             "lora_alpha": self._lora_alpha,
@@ -175,36 +176,27 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             resume_from_checkpoint=False,
         )
         # load base model checkpoint
-        model_checkpoint_dict = self._policy_checkpointer.load_checkpoint()
+        policy_model_checkpoint_dict = self._policy_checkpointer.load_checkpoint()
 
         # load reward model checkpoint
         reward_model_checkpoint_dict = self._reward_checkpointer.load_checkpoint()
 
         # update recipe state
-        if self._resume_from_checkpoint:
-            # _update_recipe_state will throw an exception if the recipe state is not correctly loaded
-            if utils.ADAPTER_KEY not in model_checkpoint_dict:
-                raise ValueError("Adapter weights not found. Please ensure a valid adapter checkpoint is provided.")
-            if utils.VALUE_HEAD_KEY not in model_checkpoint_dict:
-                raise ValueError(
-                    "Value head weights not found. Please ensure a valid value head checkpoint is provided."
-                )
-            self._update_recipe_state(model_checkpoint_dict)
-
         # ``_setup_model`` handles initialization and loading the state dict. This method
         # should be called before ``_setup_optimizer`` since transforming the optimizer
         # state dict requires the model
-        self._model, self._value_model, self._reward_model = self._setup_model(
+        (
+            self._policy_model,
+            self._value_model,
+            self._reward_model,
+            self._ref_policy_model,
+        ) = self._setup_model(
             cfg_model=cfg.policy,
             cfg_reward_model=cfg.reward_model,
             enable_activation_checkpointing=cfg.enable_activation_checkpointing,
             compile_model=cfg.compile,
-            model_state_dict=model_checkpoint_dict[utils.MODEL_KEY],
+            model_state_dict=policy_model_checkpoint_dict[utils.MODEL_KEY],
             reward_model_state_dict=reward_model_checkpoint_dict[utils.MODEL_KEY],
-            value_head_state_dict=(
-                model_checkpoint_dict[utils.VALUE_HEAD_KEY] if self._resume_from_checkpoint else None
-            ),
-            initialise_value_head_from_reward_model=cfg.initialise_value_head_from_reward_model,
         )
 
         # setup tokenizer
@@ -216,7 +208,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         # checkpoint. Transforming the opt state dict is handled by this method
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
-            opt_state_dict=(model_checkpoint_dict[utils.OPT_KEY] if self._resume_from_checkpoint else None),
+            opt_state_dict=(policy_model_checkpoint_dict[utils.OPT_KEY] if self._resume_from_checkpoint else None),
         )
 
         # GAE hyperparameters
@@ -247,7 +239,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         if self.ppo_batch_size % self._gradient_accumulation_steps != 0:
             raise ValueError(
                 f"ppo_batch_size ({self.ppo_batch_size})  must be "
-                f"exactly divisible by gradient_accumulation_steps ({cfg._gradient_accumulation_steps})."
+                f"exactly divisible by gradient_accumulation_steps ({self._gradient_accumulation_steps})."
             )
         self.ppo_backward_batch_size = cfg.ppo_batch_size // self._gradient_accumulation_steps
 
@@ -299,139 +291,67 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         compile_model: bool,
         model_state_dict: Dict[str, Any],
         reward_model_state_dict: Dict[str, Any],
-        value_head_state_dict: Optional[Dict[str, Any]] = None,
-        initialise_value_head_from_reward_model: bool = False,
     ) -> Tuple[nn.Module, nn.Module, nn.Module]:
 
         with utils.set_default_dtype(self._dtype), self._device:
-            actor = config.instantiate(cfg_model)
-            # exit()
-            self._ref_model = config.instantiate(cfg_model)
+            policy_model = config.instantiate(cfg_model)
+            ref_policy_model = config.instantiate(cfg_model)
             reward_model = config.instantiate(cfg_reward_model)
-            # if self.share_policy_and_value_backbone:
-            #    # this should be fine as long as we don't do anything but
-            #    # value_model()
-            #     value_model = lambda x: model(x)[1]
-            critic = config.instantiate(cfg_reward_model)
-
-        # self._lora_rank = cfg_model.lora_rank
-        # self._lora_alpha = cfg_model.lora_alpha
-        # self._lora_attn_modules = list(cfg_model.lora_attn_modules)
-        # self._apply_lora_to_mlp = cfg_model.apply_lora_to_mlp
-        # self._apply_lora_to_output = getattr(cfg_model, "apply_lora_to_output", False)
-        # self.adapter_params = get_adapter_params(model)
-        # set_trainable_params(model, self.adapter_params)
+            value_model = config.instantiate(cfg_reward_model)
 
         if enable_activation_checkpointing:
-            utils.set_activation_checkpointing(actor, auto_wrap_policy={modules.TransformerDecoderLayer})
-            utils.set_activation_checkpointing(critic, auto_wrap_policy={modules.TransformerDecoderLayer})
+            utils.set_activation_checkpointing(policy_model, auto_wrap_policy={modules.TransformerDecoderLayer})
+            utils.set_activation_checkpointing(value_model, auto_wrap_policy={modules.TransformerDecoderLayer})
 
-        # load checkpoints
-        # TODO (SalmanMohammadi): remove
-        reward_model_state_dict.pop("output.bias")
+        policy_model.load_state_dict(model_state_dict)
+        ref_policy_model.load_state_dict(model_state_dict)
 
         reward_model.load_state_dict(reward_model_state_dict)
-        critic.load_state_dict(reward_model_state_dict)
-        actor.load_state_dict(model_state_dict)
-        self._ref_model.load_state_dict(model_state_dict)
-
-        # if model_lora_weights_state_dict:
-        #     lora_missing, lora_unexpected = model.load_state_dict(model_lora_weights_state_dict, strict=False)
-        # else:
-        #     lora_missing, lora_unexpected = None, None
-
-        # value_head_missing, value_head_unexpected = [], []
-        # base_missing = [k for k in base_missing if "value_head" not in k]
-        # if value_head_state_dict is not None:
-        #     value_head_missing, value_head_unexpected = model.load_state_dict(value_head_state_dict, strict=False)
-        # else:
-        #     if initialise_value_head_from_reward_model:
-        #         value_head_state_dict = {}
-        #         # reward state dict should be well-formed by this point
-        #         # the only error case is mismatched shapes for classification layers
-        #         value_head_state_dict["value_head.weight"] = reward_model_state_dict["output.weight"].clone()
-        #         if "output.bias" in reward_model_state_dict:
-        #             value_head_state_dict["value_head.bias"] = reward_model_state_dict["output.bias"].clone()
-        #         try:
-        #             model.load_state_dict(value_head_state_dict, strict=False)
-        #         except RuntimeError as e:
-        #             log.info(
-        #                 f"Error loading value head state dict from reward model: {e}"
-        #                 "Hint: value head initialisation from reward model is only supported"
-        #                 "for reward single-class reward classification models."
-        #                 "Reward models which have been trained with bias=True classification layers"
-        #                 "require `use_bias`=True in the base model and reward model config."
-        #             )
-        #             raise
-        #         log.info(f"Value model is initialized from reward head")
-
-        # base_missing += value_head_missing
-        # base_unexpected += value_head_unexpected
-
-        # validate_missing_and_unexpected_for_lora(
-        #     lora_attn_modules=self._lora_attn_modules,
-        #     apply_lora_to_mlp=self._apply_lora_to_mlp,
-        #     apply_lora_to_output=self._apply_lora_to_output,
-        #     base_missing=base_missing,
-        #     base_unexpected=base_unexpected,
-        #     lora_missing=lora_missing,
-        #     lora_unexpected=lora_unexpected,
-        # )
+        value_model.load_state_dict(reward_model_state_dict)
 
         # Validate model was loaded in with the expected dtype.
-        utils.validate_expected_param_dtype(actor.named_parameters(), dtype=self._dtype)
+        utils.validate_expected_param_dtype(value_model.named_parameters(), dtype=self._dtype)
         log.info(f"Base model is initialized with precision {self._dtype}.")
 
         utils.validate_expected_param_dtype(reward_model.named_parameters(), dtype=self._dtype)
         log.info(f"Reward model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(critic.named_parameters(), dtype=self._dtype)
+        utils.validate_expected_param_dtype(value_model.named_parameters(), dtype=self._dtype)
         log.info(f"Value model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(self._ref_model.named_parameters(), dtype=self._dtype)
+        utils.validate_expected_param_dtype(self.ref_policy_model.named_parameters(), dtype=self._dtype)
         log.info(f"Ref model is initialized with precision {self._dtype}.")
 
-        for model in [actor, critic, self._ref_model, reward_model]:
+        # disabling dropout if found
+        for model in [policy_model, value_model, ref_policy_model, reward_model]:
             for module in model.modules():
                 if isinstance(module, torch.nn.Dropout):
-                    print("Dropout found!!!")
-                    assert False
                     module.p = 0
 
-        # parameter_names = [n for n, _ in self._ref_model.named_parameters()]
-        # # self._ref_model = copy.deepcopy(model)
-        # for param_name in parameter_names:
-        #     param = self._ref_model.get_parameter(param_name)
-        #     param.requires_grad = False
-        # self._ref_model.eval()
-
-        # parameter_names = [n for n, _ in reward_model.named_parameters()]
-        # # self._ref_model = copy.deepcopy(model)
-        # for param_name in parameter_names:
-        #     param = reward_model.get_parameter(param_name)
-        #     param.requires_grad = False
-        # reward_model.eval()
-
-        # TODO (SalmanMohammadi)
         # Compile model, if enabled.
-        # if compile_model:
-        #     log.info("Compiling models with torch.compile...")
-        #     backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
-        #     model.compile(backend=backend)
+        if compile_model:
+            backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
 
-        #     log.info("Compiling reward model with torch.compile...")
-        #     reward_model.compile(backend=backend)
-        #     if not share_model_value_backbone:
-        # log.info("Compiling value model with torch.compile...")
-        #     value_model.compile(backend=backend)
+            log.info("Compiling policy model with torch.compile...")
+            policy_model.compile(backend=backend)
+
+            log.info("Compiling reward model with torch.compile...")
+            reward_model.compile(backend=backend)
+
+            log.info("Compiling ref model with torch.compile...")
+            ref_policy_model.compile(backend=backend)
+
+            log.info("Compiling value model with torch.compile...")
+            value_model.compile(backend=backend)
+
         if self._device.type == "cuda":
             memory_stats = utils.get_memory_stats(device=self._device)
             utils.log_memory_stats(memory_stats)
 
-        # model = TransformerActorCritic(actor=actor, critic=critic)
         reward_model.eval()
-        self._ref_model.eval()
-        return actor, critic, reward_model
+        ref_policy_model.eval()
+
+        return policy_model, value_model, reward_model, ref_policy_model
 
     def _setup_optimizer(
         self, cfg_optimizer: DictConfig, opt_state_dict: Optional[Dict[str, Any]] = None
@@ -440,7 +360,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         # not sure if chain is necessary?
         optimizer = config.instantiate(
             cfg_optimizer,
-            chain(self._model.parameters(), self._value_model.parameters()),
+            chain(self._policy_model.parameters(), self._value_model.parameters()),
         )
         if opt_state_dict:
             optimizer.load_state_dict(opt_state_dict)
@@ -463,39 +383,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
         log.info("Learning rate scheduler is initialized.")
         return lr_scheduler
-
-    def batched_generate(self, input_ids: torch.Tensor, model: nn.Module) -> List[torch.Tensor]:
-        """
-        Generates sequences using a language model.
-        Args:
-            input_ids (torch.Tensor): The input tensor of shape [b, seq_len].
-            model (nn.Module): The model to generate sequences from.
-        Returns:
-            torch.Tensor: The concatenated queries and generated sequences of shape
-                [b, seq_len + max_generated_tokens].
-        """
-        outputs = []
-        logits = []
-        forward_batch_size = min(len(input_ids), self.forward_batch_size)
-        for batch_start in range(0, input_ids.shape[0], forward_batch_size):
-            batch_end = min(batch_start + forward_batch_size, input_ids.shape[0])
-            batch_input_ids = input_ids[batch_start:batch_end]
-
-            # outputs.extend(
-            outs, logit = ppo_utils.generate(
-                model=model,
-                prompt=batch_input_ids,
-                max_generated_tokens=self.max_generated_tokens,
-                temperature=self.temperature,
-                top_k=self.top_k,
-                # disabling truncation since we require some additional logic to handle truncation
-                stop_tokens=None,
-                pad_id=self._tokenizer.pad_id,
-            )
-            outputs.extend(outs)
-            logits.extend(logit)
-
-        return torch.stack(outputs), torch.stack(logits)
 
     def _setup_data(
         self, cfg_dataset: DictConfig, shuffle: bool, batch_size: int
@@ -523,13 +410,14 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             sampler=sampler,
             batch_size=batch_size,
             collate_fn=partial(
-                ppo_utils.left_padded_collate,
+                rlhf.left_padded_collate,
                 padding_idx=self._tokenizer.pad_id,
             ),
             drop_last=True,
         )
 
-        def repeat_generator(dataloader):
+        def repeat_generator(dataloader: DataLoader) -> Generator[torch.Tensor]:
+            # infinite generator for when num_steps > len(dataloader) // self.batch_size
             while True:
                 yield from dataloader
 
@@ -537,56 +425,135 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
         return sampler, iter(repeat_generator(dataloader))
 
-    # def
-    def generate_trajectory(self, input_ids: torch.Tensor) -> None:
+    def generate_trajectory(self, input_ids: torch.Tensor) -> Trajectory:
+        """
+        Generates a trajectory given the current policy and value model and batch of inputs.
 
-        logprobs = []
-        returns = []
-        advantages = []
-        values = []
-        masks = []
-        position_ids = []
-        padding_masks = []
-        value_padding_masks = []
-        query_responses = []
+        Args:
+            input_ids (torch.Tensor): tensor of input token IDs with shape [b, seq_length]
+
+        Returns:
+            Trajectory (NamedTuple): A collection of tensors corresponding to the current trajectory:
+
+            - query_responses (torch.Tensor): generated responses with shape [b, max_generated_tokens]
+            - logprobs (torch.Tensor): log probabilities of the generated responses with shape [b, max_generated_tokens]
+            - ref_logprobs (torch.Tensor): log probabilities of the generated responses using the reference policy with shape [b, max_generated_tokens]
+            - values (torch.Tensor): value estimates of the generated responses with shape [b, max_generated_tokens]
+            - masks (Any[torch.Tensor]): attention masks with shape [b, max_generated_tokens, max_generated_tokens]
+            - position_ids (Any[torch.Tensor]): position IDs with shape [b, max_generated_tokens]
+            - response_padding_masks (torch.Tensor): padding masks for the post-processed, truncated generated responses with shape [b, max_generated_tokens]
+            - value_padding_masks (torch.Tensor): padding masks for the values with shape [b, max_generated_tokens]
+            - value_seq_idxs (torch.Tensor): indexes of the last valid (non-padding) token in the response with shape [b]
+            - scores (torch.Tensor): scores from the reward model with shape [b]
+
+        """
+        _, context_length = input_ids.shape
+
+        # step 1: generate responses, and logits corresponding to the responses using the policy
+        query_responses, logits = rlhf.generate_with_logits(
+            model=self._policy_model,
+            prompt=input_ids,
+            max_generated_tokens=self.max_generated_tokens,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            pad_id=self._tokenizer.pad_id,
+        )
+
+        query_response_padding_masks = query_responses == self._tokenizer.pad_id
+
+        # step 1.1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
+        masks = rlhf.get_causal_mask(~(query_response_padding_masks))
+        position_ids = (~query_response_padding_masks).cumsum(-1) - (~query_response_padding_masks).long()
+        position_ids = position_ids.type(torch.int)
+
+        del query_response_padding_masks
+
+        # step 2. estimate log probabilities of the generated responses using the current policy
+        logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
+        logprobs = rlhf.logits_to_logprobs(logits, responses, self.temperature)
+
+        del logits
+
+        # step 2.1 estimate log probabilities of the generated responses using the reference policy
+        ref_logits = self._ref_policy_model(query_responses, input_pos=position_ids, mask=masks)
+        ref_logits = rlhf.query_response_logits_to_response_logits(ref_logits, context_length)
+        ref_logprobs = rlhf.logits_to_logprobs(ref_logits, responses, self.temperature)
+
+        del ref_logits
+
+        # step 3. estimate values from the generated responses using the value function
+        values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
+        values = rlhf.query_response_logits_to_response_logits(values, context_length).squeeze(
+            -1
+        )  # [b, max_generated_tokens]
+
+        # step 4. replace any tokens in the response after the first stop token (usually EOS token) with padding
+        responses = query_responses[:, context_length:].clone()
+        response_padding_masks, responses = rlhf.truncate_sequence_at_first_stop_token(
+            responses, self.stop_token_ids, self._tokenizer.pad_id
+        )
+
+        # step 5. run the reward model on the query truncated-response pairs
+        scores = self._reward_model(
+            torch.cat([input_ids, responses], dim=1),
+            input_pos=position_ids,
+            mask=masks,
+        )
+
+        del responses
+
+        # step 5.1 the reward scores from the reward model are the logits for the last non-padding token in each query+response pair
+        seq_lens = utils.get_unmasked_sequence_lengths(response_padding_masks)
+        scores = scores[torch.arange(0, self.batch_size), seq_lens + context_length].squeeze(-1)
+
+        # step 5.2 if configured, apply any penalties for sequences without EOS tokens or shorter than a certain length
+        if self.penalise_no_eos or self.min_response_length:
+            reward_penalty_mask = rlhf.get_reward_penalty_mask(
+                response_padding_masks,
+                seq_lens,
+                self.penalise_no_eos,
+                self.min_response_length,
+            )
+            scores[reward_penalty_mask] = self.reward_penalty
+
+        # step 6. mask out all the invalid values in the trajectory due to padding tokens
+        logprobs[response_padding_masks] = 1.0
+        ref_logprobs[response_padding_masks] = 1.0
+
+        # step 6.1 values are masked out *after* the last valid token in the response
+        value_seq_idxs = torch.where(
+            (seq_lens > 0) & (seq_lens < self.max_generated_tokens - 1),
+            seq_lens + 1,
+            seq_lens,
+        )
+        value_padding_masks = response_padding_masks.clone()
+        value_padding_masks[
+            torch.arange(self.batch_size, device=value_padding_masks.device),
+            value_seq_idxs,
+        ] = False
+
+        values[value_padding_masks] = 0.0
+
+        return Trajectory(
+            query_responses=query_responses,
+            logprobs=logprobs,
+            ref_logprobs=ref_logprobs,
+            values=values,
+            masks=masks,
+            position_ids=position_ids,
+            response_padding_masks=response_padding_masks,
+            value_padding_masks=value_padding_masks,
+            value_seq_idxs=value_seq_idxs,
+            scores=scores,
+        )
+
+    def generate_trajectory_batched(self, input_ids: torch.Tensor) -> Trajectory:
+        trajectories: List[Trajectory] = []
         with torch.no_grad():
-            _, context_length = input_ids.shape
             for batch_start in range(0, self.batch_size, self.forward_batch_size):
                 batch_input_ids = input_ids[batch_start : batch_start + self.forward_batch_size]
-
-                batch_query_responses, logits = ppo_utils.generate(
-                    model=self._model,
-                    prompt=batch_input_ids,
-                    max_generated_tokens=self.max_generated_tokens,
-                    temperature=self.temperature,
-                    top_k=self.top_k,
-                    # disabling truncation since we require some additional logic to handle truncation
-                    stop_tokens=None,
-                    pad_id=self._tokenizer.pad_id,
-                )
-                responses = batch_query_responses[:, context_length:].clone()
-
-            query_response_padding_masks = query_responses == self._tokenizer.pad_id
-            if query_response_padding_masks.any():
-                masks = ppo_utils.get_causal_mask(~(query_response_padding_masks))
-                position_ids = (~query_response_padding_masks).cumsum(-1) - (~query_response_padding_masks).long()
-                position_ids = position_ids.type(torch.int)
-            else:
-                # defer SDPA to handle causal masks
-                masks, position_ids = None, None
-
-            logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
-            logits /= self.temperature
-            # we only need the logprobs of the generated tokens since these are just used for KL rewards
-            logprobs = torch.gather(
-                F.log_softmax(logits, dim=-1),
-                2,
-                responses.unsqueeze(-1),  # [b, max_generated_tokens, 1]
-            ).squeeze(-1)
-
-            del logits
-
-            values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
+                trajectories.append(self.generate_trajectory(batch_input_ids))
+        return Trajectory(*map(torch.stack, zip(*trajectories)))
 
     def train(self) -> None:
         """
@@ -597,435 +564,211 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             with self._profiler:
 
                 pbar = tqdm(total=self.total_epochs)
-                batch = next(iter(self._dataloader))
                 if self._profiler_enabled:
                     self._profiler.step()
 
-                # generating the current trajectory in inference mode
-                with torch.no_grad():
-                    input_ids = batch.to(self._device)
-                    batch_size, context_length = input_ids.shape
-                    # input ids are left-padded by default - we need to shift the position ids
-                    # and generate causal masks if any sequence in the batch has been padded
-                    # both during generation and logit calculation
-                    # see https://github.com/huggingface/trl/blob/
-                    #       f5168fdbaf9cbf6a3f1bdc64dc44b9db3a9ae333/trl/trainer/utils.py#L1099
-                    query_responses, logits = self.batched_generate(input_ids, self._model)
-                    query_responses = torch.stack(query_responses)
-                    responses = query_responses[:, context_length:].clone()
-                    logits = torch.stack(logits)
+                batch = next(self._dataloader).to(self.device)
+                _, context_length = batch.shape
 
-                    # print(f"gen_logits shape: {logits.shape}")
-                    # print(query_responses.shape)
-                    # print(f"---- post generationx ---")
-                    # print(f"{self._tokenizer.decode(input_ids[0].tolist())}")
-                    # print("response ---    ")
-                    # print(f"{self._tokenizer.decode(query_responses[0].tolist())}")
-                    # print(f"query responses[0]: {query_responses[0].shape}")
-                    # create position IDs and causal masks for the current trajectory
-                    padding_masks = query_responses == self._tokenizer.pad_id
-                    # we only need custom causal masks for sequences with left-padding
-                    if padding_masks.any():
-                        masks = ppo_utils.get_causal_mask(~(padding_masks))
-                        position_ids = (~padding_masks).cumsum(-1) - (~padding_masks).long()
-                        position_ids = position_ids.type(torch.int)
-                    else:
-                        # defer SDPA to handle causal masks
-                        masks, position_ids = None, None
+                # step 1. generate the trajectory using:
+                # - the current policy (pi_theta)
+                # - the current value function (V_phi)
+                # - the reference frozen policy model (pi_theta_0)
+                trajectory = self.generate_trajectory_batched(batch)
 
-                    # print(f"POS ID: {position_ids[0]}")
-                    # we only need padding masks for responses from here on
+                # step 2. get the rewards for the current trajectory:
+                #   these are based on the divergence between the current policy and the reference policy
+                #   and the scores from the reward model
+                rewards, kl, kl_rewards = rlhf.get_rewards(
+                    trajectory.scores,
+                    trajectory.logprobs,
+                    trajectory.ref_logprobs,
+                    self.kl_controller.value,
+                    trajectory.value_seq_idxs,
+                )
 
-                    # policy and value estimates for the current trajectory
-                    # TODO (SalmanMohammadi) implement minibatch model forward pass
-                    values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
-                    # forward_logits = self._model(query_responses, input_pos=position_ids, mask=masks)
-                    # forward_logits_2 = self._model(query_responses, input_pos=position_ids, mask=masks)
-                    # print(f"eq double pass: {(forward_logits_2 == forward_logits).all()}")
-                    # print(f" logits shape: {logits.shape}")
-                    # print(f"logits mean: {forward_logits[:, :-1].mean()}, forward logits m?ean: {logits.mean()}")
-                    # num_eq = (forward_logits[:, :-1] == logits).sum()
-                    # print(f"all eq: {(forward_logits[:, :-1] == logits).all()}")
-                    # # get percentage of elements which are equal
-                    # # new = num_eq / (logits[:, :-1].shape[0] * logits[:, :-1].shape[1] * logits[:, :-1].shape[2])
-                    # print(
-                    #     f"logits vs gen logits: {num_eq / (forward_logits[:, :-1].shape[0] * forward_logits[:, :-1].shape[1] * forward_logits[:, :-1].shape[2])}"
-                    # )
+                # step 3. estimate the advantages using Generalized Advantage Estimation (GAE)
+                advantages, returns = rlhf.estimate_advantages(
+                    trajectory.values,
+                    rewards,
+                    self.gamma,
+                    self.lmbda,
+                    masks=~trajectory.padding_masks,
+                )
+                advantages[trajectory.padding_masks] = 0.0
 
-                    # print(f"values shape: {values.shape}")
-                    # print(f"logits == gen logits")
-                    # exit()
-                    # logits = logits[:, context_length - 1 :-1]  # [b, max_generated_tokens, vocab_size]
-                    logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
-                    logits /= self.temperature
-                    # we only need the logprobs of the generated tokens since these are just used for KL rewards
-                    logprobs = torch.gather(
-                        F.log_softmax(logits, dim=-1),
-                        2,
-                        responses.unsqueeze(-1),  # [b, max_generated_tokens, 1]
-                    ).squeeze(-1)
-
-                    # forward_logprobs = torch.gather(
-                    #     F.log_softmax(forward_logits[:, context_length - 1 : -1] / self.temperature, dim=-1),
-                    #     2,
-                    #     query_responses[:, context_length:].unsqueeze(-1),
-                    # ).squeeze(-1)
-                    del logits
-
-                    # print(f"logprobs == forward logprobs: {(logprobs == forward_logprobs).all()}")
-                    # print(
-                    #     f"% of equal elements: {(logprobs == forward_logprobs).sum() / (logprobs.shape[0] * logprobs.shape[1])}"
-                    # )
-                    ref_logits = self._ref_model(query_responses, input_pos=position_ids, mask=masks)
-
-                    ref_logits = ref_logits[:, context_length - 1 : -1]
-                    ref_logits /= self.temperature
-                    # shape [b, max_generated_tokens]
-                    ref_logprobs = torch.gather(
-                        F.log_softmax(ref_logits, dim=-1),
-                        2,
-                        responses.unsqueeze(-1),
-                    ).squeeze(-1)
-
-                    # print(
-                    #     f"Logprobs mean: {logprobs.mean()}, ref logprobs mean: {ref_logprobs.mean()}, forward_logprobs mean: {forward_logprobs.mean()}"
-                    # )
-                    del ref_logits
-
-                    # dear reviewer - would you rather see this as a separate function and tested?
-                    # i'm balancing between comprehensability of algo. design decisions and testability here
-
-                    # truncate sequences at the first occurence of eos_id and pad to length
-                    (
-                        padding_masks,
-                        responses,
-                    ) = ppo_utils.truncate_sequence_at_first_stop_token(
-                        responses, self.stop_token_ids, self._tokenizer.pad_id
-                    )
-                    # padding_masks = responses == self._tokenizer.pad_id
-                    # eos_mask = torch.isin(query_responses[:, context_length:], self.stop_token_ids)
-                    # truncated_responses = torch.where(
-                    #     torch.logical_xor(eos_mask.cumsum(-1), eos_mask),
-                    #     self._tokenizer.pad_id,
-                    #     query_responses[:, context_length:],
-                    # )
-                    # query_responses[:, context_length:] = torch.where(
-                    #     torch.logical_xor(eos_mask.cumsum(-1), eos_mask),
-                    #     self._tokenizer.pad_id,
-                    #     query_responses[:, context_length:],
-                    # )
-                    # print(f"query response ids --- ")
-                    # print(query_responses[0, context_length:])
-                    # print(f"eos_mask ----")
-                    # print(eos_mask[0])
-                    # print("response after truncate ---    ")
-                    # print(f"{self._tokenizer.decode(query_responses[0].tolist())}")
-
-                    # run reward model on truncated query-response sequences: shape [b, context_length + max_generated_tokens]
-                    # TODO (SalmanMohammadi): Add support for _reward_model and _model using different tokenizers
-                    scores = self._reward_model(
-                        torch.cat([input_ids, responses], dim=1),
-                        input_pos=position_ids,
-                        mask=masks,
-                    )
-                    import pdb
-
-                    # pdb.set_trace()
-                    seq_idxs = utils.get_last_unmasked_token_idx(padding_masks)
-                    # shape [b, ]
-                    scores = scores[torch.arange(0, batch_size), seq_idxs + context_length].squeeze(-1)
-                    # scores = torch.ones_like(scores) * 10
-
-                    reward_penalty_mask = torch.zeros_like(scores).to(bool)
-                    # to reviewer - see commment above
-                    # - sequences without a EOS ID recieve a score of -1
-                    if self.penalise_no_eos:
-                        reward_penalty_mask = ~padding_masks.any(-1)
-                    # - sequences with length < min_response_length recieve a score of -1
-                    if self.min_response_length is not None:
-                        reward_penalty_mask |= ~(seq_idxs >= self.min_response_length)
-
-                    # for seq_idx, eos_mask_ in zip(seq_idxs, padding_masks):
-                    #     print(eos_mask_.cumsum(-1).sum(-1) - 1)
-                    #     print(seq_idx, ~(eos_mask_.cumsum(-1).sum(-1) - 1 <= self.min_response_length))
-                    # see https://arxiv.org/pdf/1909.08593 section 3.1.2
-                    scores = torch.where(reward_penalty_mask, self.reward_penalty, scores)
-                    # import pdb
-
-                    # pdb.set_trace()
-                    # exit()
-                    # now mask out logprobs and values w.r.t. padding masks
-                    # https://github.com/huggingface/trl/blob/
-                    #   f5168fdbaf9cbf6a3f1bdc64dc44b9db3a9ae333/trl/trainer/ppov2_trainer.py#L359
-                    logprobs = torch.where(padding_masks, INVALID_LOGPROBS, logprobs)
-                    ref_logprobs = torch.where(padding_masks, INVALID_LOGPROBS, ref_logprobs)
-
-                    # values are masked after the first padding token
-                    # see https://github.com/huggingface/trl/blob/f5168fdbaf9cbf6a3f1bdc64dc44b9db3a9ae333/
-                    #   trl/trainer/ppov2_trainer.py#L354
-                    # and the link to the excalidaw therein for a visual explanation
-                    value_seq_idxs = torch.where(
-                        (seq_idxs > 0) & (seq_idxs < self.max_generated_tokens - 1),
-                        seq_idxs + 1,
-                        seq_idxs,
-                    )
-                    value_padding_masks = padding_masks.clone()
-                    value_padding_masks[
-                        torch.arange(batch_size, device=input_ids.device),
-                        value_seq_idxs,
-                    ] = False
-                    values = values[:, context_length - 1 : -1].squeeze(-1)  # [b, max_generated_tokens]
-
-                    values = torch.where(value_padding_masks, 0.0, values)
-                    # [b, max_generated_tokens]
-                    rewards, kl, kl_rewards = ppo_utils.get_rewards(
-                        scores,
-                        logprobs,
-                        ref_logprobs,
-                        self.kl_controller.value,
-                        value_seq_idxs,
-                    )
-
-                    if self.whiten_rewards:
-                        # shifting mean is disabled for rewards
-                        # https://github.com/huggingface/trl/blob/
-                        #   f5168fdbaf9cbf6a3f1bdc64dc44b9db3a9ae333/trl/trainer/ppov2_trainer.py#L373
-                        rewards = ppo_utils.masked_whiten(rewards, ~value_padding_masks, shift_mean=False)
-                        rewards = torch.where(value_padding_masks, 0.0, rewards)
-
-                    advantages, returns = ppo_utils.estimate_advantages(
-                        values, rewards, self.gamma, self.lmbda, masks=~padding_masks
-                    )
-                    advantages = torch.where(padding_masks, 0.0, advantages)
-
-                    # useful for tracking
-                    num_eos_tokens = (~reward_penalty_mask).sum().item()
-                    del seq_idxs, value_seq_idxs, responses
-
-                # import pdb
-
-                # pdb.set_trace()
-                # trajectory generated! time to optimise
-                approx_policy_kls = []
-                losses = []
-                policy_losses = []
-                value_losses = []
-                entropies = []
-                # print(f"advamages: {advantages[0]}, advantages shape: {advantages.shape}")
-                # print(f"returns: {returns[0]} returns shape: {returns.shape}")
-                # print(f"values: {values[0]}, values shape: {values.shape}")
-                # print("rewards: ", rewards[0], rewards.shape)
-                # print(f"query responses: {query_responses.shape}")
-                # print(f"--- scores: {scores}")
-                # print("response before ppo ---    ")
-                # print(f"{self._tokenizer.decode(query_responses[0].tolist())}")
-                for _ in range(self.ppo_epochs):
-                    # print("--- inside ppo loop ---")
-                    # TODO (SalmanMohammadi): Add support for early stopping
-                    # shuffle batch indices every epoch
+                # step 4. optimise using the PPO objective over multiple epochs
+                ppo_stats = [
+                    [],
+                ] * 6
+                for epoch_idx in range(self.ppo_epochs):
                     batch_idxs = torch.randperm(self.batch_size)
-                    # batch_idxs = torch.arange(self.batch_size)
-                    # print(batch_idxs)
-                    for i in range(0, batch_size, self.ppo_batch_size):
+                    for i in range(0, self.batch_size, self.ppo_batch_size):
                         mini_batch_idxs = batch_idxs[i : i + self.ppo_batch_size]
-                        # print(mini_batch_idxs)
-                        running_loss = 0
-                        running_policy_loss = 0
-                        running_vf_loss = 0
+
+                        batch_ppo_stats = [0] * 6
                         for j in range(0, self.ppo_batch_size, self.ppo_backward_batch_size):
                             backward_batch_idxs = mini_batch_idxs[j : j + self.ppo_backward_batch_size]
-
-                            backward_returns = returns[backward_batch_idxs]
-                            backward_advantages = advantages[backward_batch_idxs]
-                            backward_logprobs = logprobs[backward_batch_idxs]
-                            backward_query_responses = query_responses[backward_batch_idxs]
-                            backward_masks = masks[backward_batch_idxs] if masks is not None else None
-                            backward_position_ids = (
-                                position_ids[backward_batch_idxs] if position_ids is not None else None
-                            )
-                            backward_padding_masks = padding_masks[backward_batch_idxs]
-                            backward_value_padding_masks = value_padding_masks[backward_batch_idxs]
-                            backward_values = values[backward_batch_idxs]
-                            # print(f"backwards q r shape: {backward_query_responses.shape}")
-                            # print(f"logprob = backward logprobs: {logprobs[0] == backward_logprobs}")
-                            # policy and value estimates for the current optimisation step
-                            # pi_{theta] and V_{phi}
-                            # TODO (SalmanMohammadi) implement minibatch model forward pass
-
-                            pi_logits = self._model(
-                                backward_query_responses,
-                                input_pos=backward_position_ids,
-                                mask=backward_masks,
-                            )
-                            # print(backward_query_responses[0] == query_responses[0])
-                            # print(kl[0] == (backward_logprobs[0] - ref_logprobs[0]))
-                            # print(f"backwards gen: {self._tokenizer.decode(backward_query_responses[0].tolist())}")
-                            # print(f"backwards gen 2 : {self._tokenizer.decode(query_responses[0].tolist())}")
-                            # print(f"backwards mask shape {backward_masks.shape}")
-                            # print(f"backwards padding mask shape {backward_padding_masks.shape}")
-                            # print(f"backwards value mask shape {backward_value_padding_masks.shape}")
-                            # print(f"backwards pos id shape {backward_position_ids.shape}")
-                            # print(f"backwards pos id  {backward_position_ids[0]}")
-
-                            pi_logits = pi_logits[:, context_length - 1 : -1]
-                            pi_logits /= self.temperature
-                            pi_logprobs = torch.gather(
-                                F.log_softmax(pi_logits, dim=-1),
-                                2,
-                                backward_query_responses[:, context_length:].unsqueeze(-1),
-                            ).squeeze(-1)
-
-                            pi_logprobs = torch.where(backward_padding_masks, INVALID_LOGPROBS, pi_logprobs)
-                            phi_values = self._value_model(
-                                backward_query_responses,
-                                input_pos=backward_position_ids,
-                                mask=backward_masks,
+                            batch_trajectory = Trajectory(
+                                *map(
+                                    partial(
+                                        torch.index_select,
+                                        dim=0,
+                                        index=backward_batch_idxs,
+                                    ),
+                                    trajectory,
+                                )
                             )
 
-                            phi_values = phi_values[:, context_length - 1 : -1].squeeze(-1)
-                            phi_values = torch.where(backward_value_padding_masks, 0.0, phi_values)
-                            loss, policy_loss, value_loss = self._loss_fn(
-                                backward_logprobs,
-                                pi_logprobs,
-                                backward_advantages,
-                                backward_values,
-                                phi_values,
-                                backward_returns,
-                                padding_masks=~backward_padding_masks,
-                                value_padding_masks=~backward_value_padding_masks,
-                            )
-                            import pdb
+                            backward_ppo_stats = self.ppo_step(batch_trajectory, advantages, returns, context_length)
 
-                            # pdb.set_trace()
-                            loss /= self._gradient_accumulation_steps
-                            loss.backward()
-                            policy_loss /= self._gradient_accumulation_steps
-                            value_loss /= self._gradient_accumulation_steps
-                            # print(value_loss)
-                            # import pdb
+                            batch_ppo_stats = [
+                                stat + bstat for stat, bstat in zip(batch_ppo_stats, backward_ppo_stats)
+                            ]
 
-                            # pdb.set_trace()
-                            running_loss += loss
-                            running_policy_loss += policy_loss
-                            running_vf_loss += value_loss
+                            del batch_trajectory
 
-                            with torch.no_grad():
-                                prob_dist = F.softmax(pi_logits, dim=-1)
-                                entropy = torch.logsumexp(pi_logits, dim=-1) - torch.sum(prob_dist * pi_logits, dim=-1)
-                                entropies.append(entropy.mean())
-                                approx_policy_kls.append((0.5 * (pi_logprobs - backward_logprobs).pow(2)).mean())
-                                # losses.append(loss.detach().item())
-                                # policy_losses.append(policy_loss.item())
-                                # value_losses.append(value_loss.item())
-                            del (
-                                pi_logits,
-                                pi_logprobs,
-                                backward_logprobs,
-                                backward_query_responses,
-                                backward_masks,
-                                backward_position_ids,
-                                backward_padding_masks,
-                                backward_value_padding_masks,
-                                backward_values,
-                                backward_returns,
-                                backward_advantages,
-                            )
-
+                        ppo_stats = [
+                            ppo_stat + [batch_ppo_stat] for ppo_stat, batch_ppo_stat in zip(ppo_stats, batch_ppo_stats)
+                        ]
                         self._optimizer.step()
                         self._optimizer.zero_grad()
-
                         self.global_step += 1
-                        losses.append(running_loss.item())
-                        policy_losses.append(running_policy_loss.item())
-                        value_losses.append(running_vf_loss.item())
 
-            self.epochs_run += 1
-            # self.save_checkpoint(epoch=curr_epoch)
-            pbar.update(1)
-            pbar.set_description(f"Step: {curr_epoch+1}| reward: {rewards.sum(1).mean()}")
+                # step 5. profit
 
-            kl = logprobs - ref_logprobs
-            log_dict = {
-                "advantages": torch.tensor(advantages).mean().item(),
-                "loss": torch.tensor(losses).mean().item(),
-                "mean_per_token_reward": rewards.sum(1).mean().item(),
-                "rlhf_reward": scores.mean().item() + kl_rewards.sum(1).mean().item(),
-                "kl": kl.sum(1).mean().item(),
-                "policy_loss": torch.tensor(policy_losses).mean().item(),
-                "value_loss": torch.tensor(value_losses).mean().item(),
-                "approx_policy_kl": torch.tensor(approx_policy_kls).mean().item(),
-                "entropy": torch.tensor(entropies).mean().item(),
-                "num_eos_tokens": num_eos_tokens,
-                "scores": scores.mean().item(),
-                "values": values.mean().item(),
-                "returns": returns.mean().item(),
-                "kl_rewards": kl_rewards.sum(1).mean().item(),
-            }
-            self._metric_logger.log_dict(
-                log_dict,
-                step=self.global_step,
-            )
-            self.kl_controller.update(kl.sum(1).mean().item(), curr_epoch)
-
-            with torch.no_grad():
-                toks = torch.tensor(
-                    self._tokenizer.encode("The room was decorated with a", add_eos=False, add_bos=False)
-                )
-                context_len = len(toks)
-                toks = toks.to(self._device).unsqueeze(0)
-
-                outputs, _ = ppo_utils.generate(
-                    model=self._model,
-                    prompt=toks,
-                    max_generated_tokens=50,
-                    temperature=self.temperature,
-                    top_k=None,
-                    stop_tokens=None,
-                    pad_id=self._tokenizer.pad_id,
-                )
-
-                query_response = self._tokenizer.decode(outputs.squeeze().tolist())
-                # columns = ["input", "response"]
-                # data = [[query_response[:context_len], query_response[context_len:]]]
-                # try:
-                #     import wandb
-                # import wandb
-
-                # table = wandb.Table(columns=columns, data=data)
-                # self._metric_logger.log("query responses", table, step=self.global_step)
-                # except ImportError:
-                eos_mask, responses = ppo_utils.truncate_sequence_at_first_stop_token(
-                    outputs.clone(), self.stop_token_ids, self._tokenizer.pad_id
-                )
-                padding_masks = responses == self._tokenizer.pad_id
-
-                seq_idxs = utils.get_last_unmasked_token_idx(padding_masks)
-                print(seq_idxs)
-                print("completion", query_response)
-                print(
-                    "completion truncated",
-                    self._tokenizer.decode(responses.squeeze().tolist()),
-                )
-
-            # delete values and clear cache
-            del (
-                returns,
-                advantages,
-                logprobs,
-                ref_logprobs,
-                rewards,
+            ppo_stats = map(torch.tensor, ppo_stats)
+            self.log_metrics(
+                trajectory,
                 kl,
                 kl_rewards,
-                query_responses,
-                masks,
-                padding_masks,
-                value_padding_masks,
-                values,
+                *ppo_stats,
             )
-            if self._device.type == "cuda":
-                torch.cuda.empty_cache()
-            elif self._device.type == "mps":
-                torch.mps.empty_cache()
+            self.kl_controller.update(kl.sum(1).mean().item(), self.global_step)
+            self.cleanup_step(trajectory, advantages, returns, kl, kl_rewards)
+
+    def ppo_step(
+        self,
+        trajectory: Trajectory,
+        advantages: torch.Tensor,
+        returns: torch.Tensor,
+        context_length: int,
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """
+        Perform a single PPO optimisation step over a batch of trajectories and corresponding advantages and returns.
+
+        Args:
+            trajectory (Trajectory): a batch of trajectories
+            advantages (torch.Tensor): advantages corresponding to the trajectories
+            returns (torch.Tensor): returns corresponding the trajectories
+            context_length (int): input ids sequence length
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                loss: Actor-critic combined policy and value loss
+                policy_loss: PPO policy loss
+                value_loss: Clipped critic value loss
+                approx_policy_kls: Average estimated KL divergence between the policy before and after the optimisation step
+                ratios: Logprob ratios between the current policy being optimised, and the policy used to generate the trajectory
+                clipfrac: Fraction of samples where the policy ratio has been clipped in the PPO objective
+        """
+        # estimate logprobs from the policy at the current optimisation step
+        pi_logits = self._policy_model(
+            trajectory.query_responses,
+            input_pos=trajectory.position_ids,
+            mask=trajectory.masks,
+        )
+        pi_logits = rlhf.query_response_logits_to_response_logits(pi_logits, context_length)
+        pi_logprobs = rlhf.logits_to_logprobs(pi_logits, trajectory.responses, self.temperature)
+        pi_logprobs[trajectory.padding_masks] = 1.0
+
+        # sesimate the values from the value function at the current optimisation step
+        phi_values = self._value_model(
+            trajectory.query_responses,
+            input_pos=trajectory.position_ids,
+            mask=trajectory.masks,
+        )
+
+        phi_values = rlhf.query_response_logits_to_response_logits(phi_values, context_length).squeeze(-1)
+        phi_values[trajectory.value_padding_masks] = 0.0
+
+        # calculate ppo loss
+        loss, policy_loss, value_loss, ratios, clipfrac = self._loss_fn(
+            trajectory.logprobs,
+            pi_logprobs,
+            advantages,
+            trajectory.values,
+            phi_values,
+            returns,
+            padding_masks=~trajectory.padding_masks,
+            value_padding_masks=~trajectory.value_padding_masks,
+        )
+
+        loss /= self._gradient_accumulation_steps
+
+        loss.backward()
+
+        policy_loss /= self._gradient_accumulation_steps
+        value_loss /= self._gradient_accumulation_steps
+
+        with torch.no_grad():
+            approx_policy_kls = (0.5 * (pi_logprobs - trajectory.logprobs).pow(2)).mean()
+
+        return loss, policy_loss, value_loss, approx_policy_kls, ratios, clipfrac
+
+    def log_metrics(
+        self,
+        trajectory: Trajectory,
+        kl: torch.Tensor,
+        kl_rewards: torch.Tensor,
+        loss: torch.Tensor,
+        policy_loss: torch.Tensor,
+        value_loss: torch.Tensor,
+        approx_policy_kls: torch.Tensor,
+        ratios: torch.Tensor,
+        clipfrac: torch.Tensor,
+    ) -> None:
+        """
+        Log metrics and statistics for the current step to the metric logger.
+        """
+        log_dict = {
+            "entropy": -trajectory.logprobs.sum(1).mean(),
+            "scores": trajectory.scores.mean(),
+            "num_stop_tokens": trajectory.response_padding_masks.any(-1).sum(),
+            "rlhf_reward": trajectory.scores.mean() + kl_rewards.sum(1).mean(),
+            "kl": kl.sum(1).mean(),
+            "kl_reward": kl_rewards.sum(1).mean(),
+            "loss": loss.mean(),
+            "policy_loss": policy_loss.mean(),
+            "value_loss": value_loss.mean(),
+            "approx_policy_kl": approx_policy_kls.mean(),
+            "clipfrac": clipfrac.mean(),
+            "ratios": ratios.mean(),
+        }
+        self._metric_logger.log_dict(log_dict, step=self.global_step)
+
+    def cleanup_epoch(
+        trajectory: Trajectory,
+        advantages: torch.Tensor,
+        returns: torch.Tensor,
+        kl: torch.Tensor,
+        kl_rewards: torch.Tensor,
+    ) -> None:
+        # there shouldn't be any floating references to the individual tensors at the this point, so gc can do its thing
+        for tensor in trajectory:
+            del tensor
+        del trajectory
+        del advantages
+        del returns
+        del kl
+        del kl_rewards
 
     def cleanup(self, **kwargs) -> None:
         self._metric_logger.close()
@@ -1040,8 +783,8 @@ def recipe_main(cfg: DictConfig) -> None:
         - Parameters specified in config (see available configs through ``tune ls``)
         - Overwritten by arguments from the command-line
     """
-    config.log_config(recipe_name="PPORecipeSingleDevice", cfg=cfg)
-    recipe = PPORecipeSingleDevice(cfg=cfg)
+    config.log_config(recipe_name="PPOFullFinetuneRecipeSingleDevice", cfg=cfg)
+    recipe = PPOFullFinetuneRecipeSingleDevice(cfg=cfg)
     recipe.setup(cfg=cfg)
     recipe.train()
     recipe.cleanup()

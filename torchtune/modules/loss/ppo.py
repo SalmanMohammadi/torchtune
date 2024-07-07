@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from torchtune.utils import ppo_utils
+from torchtune.modules import rlhf
 
 
 class PPOLoss(nn.Module):
@@ -82,6 +82,13 @@ class PPOLoss(nn.Module):
         # print(f"clipped_ratios: {clipped_ratios.mean()}")
         policy_losses_clipped = -advantages * clipped_ratios
         policy_losses_unclipped = -advantages * ratios
+
+        clipfrac = (policy_losses_clipped > policy_losses_unclipped).float()
+        clipfrac = (
+            clipfrac.mean()
+            if padding_masks is None
+            else rlhf.masked_mean(clipfrac, padding_masks)
+        )
         # print(
         #     f"clipfrac: {ppo_ut;ils.masked_mean((policy_losses_clipped > s
         # print(f"policy_losses_clipped: {ppo_utils.masked_mean(policy_losses_clipped, padding_masks)}")
@@ -93,7 +100,7 @@ class PPOLoss(nn.Module):
         policy_loss = (
             policy_loss.mean()
             if padding_masks is None
-            else ppo_utils.masked_mean(policy_loss, padding_masks)
+            else rlhf.masked_mean(policy_loss, padding_masks)
         )
         # print(f"final policy_loss: {policy_loss}")
         values_clipped = torch.clamp(
@@ -107,8 +114,8 @@ class PPOLoss(nn.Module):
         value_loss = (
             0.5 * value_loss.mean()
             if value_padding_masks is None
-            else 0.5 * ppo_utils.masked_mean(value_loss, value_padding_masks)
+            else 0.5 * rlhf.masked_mean(value_loss, value_padding_masks)
         )
 
         loss = policy_loss + (value_loss * self.value_coeff)
-        return loss, policy_loss, value_loss
+        return loss, policy_loss, value_loss, ratios.mean(), clipfrac

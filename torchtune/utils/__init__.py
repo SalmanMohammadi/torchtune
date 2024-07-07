@@ -43,7 +43,6 @@ from .constants import (  # noqa
     OPT_KEY,
     SEED_KEY,
     TOTAL_EPOCHS_KEY,
-    VALUE_HEAD_KEY,
 )
 from .logging import get_logger
 from .memory import (  # noqa
@@ -55,7 +54,7 @@ from .memory import (  # noqa
     register_optim_in_bwd_hooks,
     set_activation_checkpointing,
 )
-from .pooling import get_last_unmasked_token_idx
+from .pooling import get_unmasked_sequence_lengths
 
 from .precision import (
     get_dtype,
@@ -82,7 +81,7 @@ __all__ = [
     "get_full_finetune_fsdp_wrap_policy",
     "padded_collate",
     "padded_collate_dpo",
-    "get_last_unmasked_token_idx",
+    "get_unmasked_sequence_lengths",
     "set_activation_checkpointing",
     "set_default_dtype",
     "set_seed",

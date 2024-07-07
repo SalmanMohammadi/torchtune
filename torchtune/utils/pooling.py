@@ -6,9 +6,9 @@
 import torch
 
 
-def get_last_unmasked_token_idx(mask: torch.Tensor, dtype=torch.long) -> torch.Tensor:
+def get_unmasked_sequence_lengths(mask: torch.Tensor, dtype=torch.long) -> torch.Tensor:
     """
-    Returns the index for the last unmasked entry for each row of a 2D boolean mask.
+    Returns the sequence lengths for each batch element, excluding masked tokens.
     Args:
         mask (torch.Tensor): Boolean mask with shape [b x s], where True indicates a value to be masked out
             - this is usually a mask for padding tokens, where True indicates a padding token
@@ -32,6 +32,8 @@ def get_last_unmasked_token_idx(mask: torch.Tensor, dtype=torch.long) -> torch.T
     if mask.any():
         sequence_lengths = (~mask).sum(-1).sub(1).clip(0).to(mask.device, dtype=dtype)
     else:
-        sequence_lengths = torch.full((mask.shape[0],), mask.shape[1] - 1, dtype=dtype, device=mask.device)
+        sequence_lengths = torch.full(
+            (mask.shape[0],), mask.shape[1] - 1, dtype=dtype, device=mask.device
+        )
 
     return sequence_lengths

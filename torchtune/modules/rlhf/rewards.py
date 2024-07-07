@@ -9,6 +9,38 @@ from typing import Optional, Tuple
 import torch
 
 
+def get_reward_penalty_mask(
+    padding_masks: torch.Tensor,
+    seq_lens: torch.Tensor,
+    penalise_no_eos: bool = True,
+    min_response_length: bool = None,
+) -> torch.Tensor:
+    """
+    Calculates a mask to penalise scores corresponding to sequences generated during PPO.
+    Scores are penalised s.t.:
+    - scores for sequences with length < min_response_length are set to -1
+    - scores for sequences with no EOS token are set to -1
+
+    Args:
+        padding_masks (torch.Tensor): Tensors where True indicates a padding token in the generated
+            sequence, and False otherwise. These are created when generated sequences are truncated at EOS token(s)
+            and filled with padding values. Shape: (b, reponse_len)
+        seq_lens (torch.Tensor): The length of each generated sequence. Shape: (b,)
+        penalise_no_eos (bool): Whether to penalise sequences with no EOS token. Defaults to True.
+        min_response_length (int, optional): The minimum length of the response. If set, any responses is shorter
+            than this length
+             will be penalised. Defaults to None.
+    """
+    reward_penalty_mask = torch.zeros_like(seq_lens).to(bool)
+
+    if penalise_no_eos:
+        reward_penalty_mask = ~padding_masks.any(-1)
+    # - sequences with length < min_response_length recieve a score of -1
+    if min_response_length is not None:
+        reward_penalty_mask |= ~(seq_lens >= min_response_length)
+    return reward_penalty_mask
+
+
 def get_rewards(
     scores: torch.Tensor,
     logprobs: torch.Tensor,
@@ -51,7 +83,9 @@ def get_rewards(
     # adding reward to kl at final valid position
     # https://github.com/openai/lm-human-preferences/blob/cbfd210bb8b08f6bc5c26878c10984b90f516c66/lm_human_preferences/train_policy.py#L153
     if valid_score_idxs is not None:
-        total_reward[torch.arange(scores.shape[0], device=scores.device), valid_score_idxs] += scores
+        total_reward[
+            torch.arange(scores.shape[0], device=scores.device), valid_score_idxs
+        ] += scores
     else:
         total_reward[:, -1] += scores
 
@@ -75,7 +109,9 @@ def whiten(x: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
     return whitened
 
 
-def masked_mean(x: torch.Tensor, mask: torch.Tensor, dim: Optional[int] = None) -> torch.Tensor:
+def masked_mean(
+    x: torch.Tensor, mask: torch.Tensor, dim: Optional[int] = None
+) -> torch.Tensor:
     """
     Compute mean of tensor with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
 
@@ -91,7 +127,9 @@ def masked_mean(x: torch.Tensor, mask: torch.Tensor, dim: Optional[int] = None) 
     return (x * mask).sum(dim=dim) / mask.sum(dim=dim)
 
 
-def masked_var(x: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
+def masked_var(
+    x: torch.Tensor, mask: torch.Tensor, unbiased: bool = True
+) -> torch.Tensor:
     """
     Compute variance of tensor with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
 
@@ -124,7 +162,9 @@ def masked_var(x: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> to
     return var
 
 
-def masked_whiten(x: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
+def masked_whiten(
+    x: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True
+) -> torch.Tensor:
     """
     Whiten (normalises) values with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
     Args:

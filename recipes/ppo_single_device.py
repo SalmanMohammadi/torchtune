@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torchtune import config, modules, utils
 from torchtune.datasets import ConcatDataset
 from torchtune.models.mistral.modules.transformer import TransformerActorCritic
+from torchtune.modules import rlhf
 from torchtune.modules.peft.peft_utils import (
     disable_adapter,
     get_adapter_params,
@@ -32,7 +33,6 @@ from torchtune.modules.peft.peft_utils import (
     validate_missing_and_unexpected_for_lora,
 )
 from torchtune.recipe_interfaces import FTRecipeInterface
-from torchtune.utils import ppo_utils
 from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
@@ -48,15 +48,21 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
         if self._dtype == torch.float16:
-            raise ValueError("fp16 precision is not supported in this recipe. Please use fp32 or bf16.")
+            raise ValueError(
+                "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
+            )
         # For CUDA devices, check if the HW supports bf16 if bf16 is specified.
         if self._dtype == torch.bfloat16 and self._device != torch.device("cpu"):
             if torch.cuda.is_available():
                 if not torch.cuda.is_bf16_supported():
-                    raise RuntimeError("Full bf16 training is not supported on this hardware.")
+                    raise RuntimeError(
+                        "Full bf16 training is not supported on this hardware."
+                    )
             elif torch.backends.mps.is_available():
                 if packaging.version.parse(torch.__version__).release < (2, 3):
-                    raise RuntimeError("Full bf16 training is not supported on this hardware.")
+                    raise RuntimeError(
+                        "Full bf16 training is not supported on this hardware."
+                    )
         # logging attributes
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
@@ -118,7 +124,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
         # Construct the adapter weights
         adapter_key_filter = lambda x: x in self.adapter_params
-        adapter_state_dict = {k: v for k, v in self._model.state_dict().items() if adapter_key_filter(k)}
+        adapter_state_dict = {
+            k: v for k, v in self._model.state_dict().items() if adapter_key_filter(k)
+        }
         adapter_config = {
             "r": self._lora_rank,
             "lora_alpha": self._lora_alpha,
@@ -144,7 +152,10 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         """
         # If seed or total_epoch,
         # warn the user and overwrite
-        if self.seed != ckpt_dict[utils.SEED_KEY] or self.total_epochs != ckpt_dict[utils.TOTAL_EPOCHS_KEY]:
+        if (
+            self.seed != ckpt_dict[utils.SEED_KEY]
+            or self.total_epochs != ckpt_dict[utils.TOTAL_EPOCHS_KEY]
+        ):
             warn(
                 message="""Configured value for seed or epochs
                 does not match the value stored in checkpoint."""
@@ -184,7 +195,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         if self._resume_from_checkpoint:
             # _update_recipe_state will throw an exception if the recipe state is not correctly loaded
             if utils.ADAPTER_KEY not in model_checkpoint_dict:
-                raise ValueError("Adapter weights not found. Please ensure a valid adapter checkpoint is provided.")
+                raise ValueError(
+                    "Adapter weights not found. Please ensure a valid adapter checkpoint is provided."
+                )
             if utils.VALUE_HEAD_KEY not in model_checkpoint_dict:
                 raise ValueError(
                     "Value head weights not found. Please ensure a valid value head checkpoint is provided."
@@ -201,9 +214,6 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             compile_model=cfg.compile,
             model_state_dict=model_checkpoint_dict[utils.MODEL_KEY],
             reward_model_state_dict=reward_model_checkpoint_dict[utils.MODEL_KEY],
-            value_head_state_dict=(
-                model_checkpoint_dict[utils.VALUE_HEAD_KEY] if self._resume_from_checkpoint else None
-            ),
             initialise_value_head_from_reward_model=cfg.initialise_value_head_from_reward_model,
         )
 
@@ -216,7 +226,11 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         # checkpoint. Transforming the opt state dict is handled by this method
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
-            opt_state_dict=(model_checkpoint_dict[utils.OPT_KEY] if self._resume_from_checkpoint else None),
+            opt_state_dict=(
+                model_checkpoint_dict[utils.OPT_KEY]
+                if self._resume_from_checkpoint
+                else None
+            ),
         )
 
         # GAE hyperparameters
@@ -249,7 +263,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                 f"ppo_batch_size ({self.ppo_batch_size})  must be "
                 f"exactly divisible by gradient_accumulation_steps ({cfg.gradient_accumulation_steps})."
             )
-        self.ppo_backward_batch_size = cfg.ppo_batch_size // self._gradient_accumulation_steps
+        self.ppo_backward_batch_size = (
+            cfg.ppo_batch_size // self._gradient_accumulation_steps
+        )
 
         # trajectory generation args
         self.temperature = cfg.temperature + 1e-7  # avoid underflow for 0 temperature
@@ -282,7 +298,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         self.stop_token_ids = torch.tensor(stop_token_ids, device=self._device)
         self.total_epochs = self.num_steps // self.batch_size
         # one "step" is an update over a batch of trajectories
-        self._steps_per_epoch = self.num_steps  # len(self._dataloader) // self.batch_size
+        self._steps_per_epoch = (
+            self.num_steps
+        )  # len(self._dataloader) // self.batch_size
         self.global_step = self.epochs_run * self._steps_per_epoch
 
         # setup adaptive KL controller
@@ -323,8 +341,12 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         # set_trainable_params(model, self.adapter_params)
 
         if enable_activation_checkpointing:
-            utils.set_activation_checkpointing(actor, auto_wrap_policy={modules.TransformerDecoderLayer})
-            utils.set_activation_checkpointing(critic, auto_wrap_policy={modules.TransformerDecoderLayer})
+            utils.set_activation_checkpointing(
+                actor, auto_wrap_policy={modules.TransformerDecoderLayer}
+            )
+            utils.set_activation_checkpointing(
+                critic, auto_wrap_policy={modules.TransformerDecoderLayer}
+            )
 
         # load checkpoints
         # TODO (SalmanMohammadi): remove
@@ -382,13 +404,19 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         utils.validate_expected_param_dtype(actor.named_parameters(), dtype=self._dtype)
         log.info(f"Base model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(reward_model.named_parameters(), dtype=self._dtype)
+        utils.validate_expected_param_dtype(
+            reward_model.named_parameters(), dtype=self._dtype
+        )
         log.info(f"Reward model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(critic.named_parameters(), dtype=self._dtype)
+        utils.validate_expected_param_dtype(
+            critic.named_parameters(), dtype=self._dtype
+        )
         log.info(f"Value model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(self._ref_model.named_parameters(), dtype=self._dtype)
+        utils.validate_expected_param_dtype(
+            self._ref_model.named_parameters(), dtype=self._dtype
+        )
         log.info(f"Ref model is initialized with precision {self._dtype}.")
 
         for model in [actor, critic, self._ref_model, reward_model]:
@@ -464,7 +492,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         log.info("Learning rate scheduler is initialized.")
         return lr_scheduler
 
-    def batched_generate(self, input_ids: torch.Tensor, model: nn.Module) -> List[torch.Tensor]:
+    def batched_generate(
+        self, input_ids: torch.Tensor, model: nn.Module
+    ) -> List[torch.Tensor]:
         """
         Generates sequences using a language model.
         Args:
@@ -482,7 +512,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             batch_input_ids = input_ids[batch_start:batch_end]
 
             # outputs.extend(
-            outs, logit = ppo_utils.generate(
+            outs, logit = rlhf.generate_with_logits(
                 model=model,
                 prompt=batch_input_ids,
                 max_generated_tokens=self.max_generated_tokens,
@@ -505,7 +535,8 @@ class PPORecipeSingleDevice(FTRecipeInterface):
         """
         if isinstance(cfg_dataset, ListConfig):
             datasets = [
-                config.instantiate(single_cfg_dataset, tokenizer=self._tokenizer) for single_cfg_dataset in cfg_dataset
+                config.instantiate(single_cfg_dataset, tokenizer=self._tokenizer)
+                for single_cfg_dataset in cfg_dataset
             ]
             ds = ConcatDataset(datasets=datasets)
         else:
@@ -523,7 +554,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             sampler=sampler,
             batch_size=batch_size,
             collate_fn=partial(
-                ppo_utils.left_padded_collate,
+                rlhf.left_padded_collate,
                 padding_idx=self._tokenizer.pad_id,
             ),
             drop_last=True,
@@ -559,7 +590,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # both during generation and logit calculation
                     # see https://github.com/huggingface/trl/blob/
                     #       f5168fdbaf9cbf6a3f1bdc64dc44b9db3a9ae333/trl/trainer/utils.py#L1099
-                    query_responses, logits = self.batched_generate(input_ids, self._model)
+                    query_responses, logits = self.batched_generate(
+                        input_ids, self._model
+                    )
                     query_responses = torch.stack(query_responses)
                     responses = query_responses[:, context_length:].clone()
                     logits = torch.stack(logits)
@@ -575,8 +608,10 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     padding_masks = query_responses == self._tokenizer.pad_id
                     # we only need custom causal masks for sequences with left-padding
                     if padding_masks.any():
-                        masks = ppo_utils.get_causal_mask(~(padding_masks))
-                        position_ids = (~padding_masks).cumsum(-1) - (~padding_masks).long()
+                        masks = rlhf.get_causal_mask(~(padding_masks))
+                        position_ids = (~padding_masks).cumsum(-1) - (
+                            ~padding_masks
+                        ).long()
                         position_ids = position_ids.type(torch.int)
                     else:
                         # defer SDPA to handle causal masks
@@ -587,7 +622,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
                     # policy and value estimates for the current trajectory
                     # TODO (SalmanMohammadi) implement minibatch model forward pass
-                    values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
+                    values = self._value_model(
+                        query_responses, input_pos=position_ids, mask=masks
+                    )
                     # forward_logits = self._model(query_responses, input_pos=position_ids, mask=masks)
                     # forward_logits_2 = self._model(query_responses, input_pos=position_ids, mask=masks)
                     # print(f"eq double pass: {(forward_logits_2 == forward_logits).all()}")
@@ -606,7 +643,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # exit()
                     # logits = logits[:, context_length - 1 :-1]  # [b, max_generated_tokens, vocab_size]
                     # logits = logits[:, context_length - 1 :-1]  # [b, max_generated_tokens, vocab_size]
-                    logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
+                    logits = logits[
+                        :, context_length - 1 :
+                    ]  # [b, max_generated_tokens, vocab_size]
                     logits /= self.temperature
                     # we only need the logprobs of the generated tokens since these are just used for KL rewards
                     logprobs = torch.gather(
@@ -625,7 +664,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # print(
                     #     f"% of equal elements: {(logprobs == forward_logprobs).sum() / (logprobs.shape[0] * logprobs.shape[1])}"
                     # )
-                    ref_logits = self._ref_model(query_responses, input_pos=position_ids, mask=masks)
+                    ref_logits = self._ref_model(
+                        query_responses, input_pos=position_ids, mask=masks
+                    )
 
                     ref_logits = ref_logits[:, context_length - 1 : -1]
                     ref_logits /= self.temperature
@@ -648,7 +689,7 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     (
                         padding_masks,
                         responses,
-                    ) = ppo_utils.truncate_sequence_at_first_stop_token(
+                    ) = rlhf.truncate_sequence_at_first_stop_token(
                         responses, self.stop_token_ids, self._tokenizer.pad_id
                     )
                     # padding_masks = responses == self._tokenizer.pad_id
@@ -678,9 +719,11 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         mask=masks,
                     )
                     # pdb.set_trace()
-                    seq_idxs = utils.get_last_unmasked_token_idx(padding_masks)
+                    seq_lens = utils.get_unmasked_sequence_lengths(padding_masks)
                     # shape [b, ]
-                    scores = scores[torch.arange(0, batch_size), seq_idxs + context_length].squeeze(-1)
+                    scores = scores[
+                        torch.arange(0, batch_size), seq_lens + context_length
+                    ].squeeze(-1)
                     # scores = torch.ones_like(scores) * 10
 
                     reward_penalty_mask = torch.zeros_like(scores).to(bool)
@@ -690,13 +733,15 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         reward_penalty_mask = ~padding_masks.any(-1)
                     # - sequences with length < min_response_length recieve a score of -1
                     if self.min_response_length is not None:
-                        reward_penalty_mask |= ~(seq_idxs >= self.min_response_length)
+                        reward_penalty_mask |= ~(seq_lens >= self.min_response_length)
 
                     # for seq_idx, eos_mask_ in zip(seq_idxs, padding_masks):
                     #     print(eos_mask_.cumsum(-1).sum(-1) - 1)
                     #     print(seq_idx, ~(eos_mask_.cumsum(-1).sum(-1) - 1 <= self.min_response_length))
                     # see https://arxiv.org/pdf/1909.08593 section 3.1.2
-                    scores = torch.where(reward_penalty_mask, self.reward_penalty, scores)
+                    scores = torch.where(
+                        reward_penalty_mask, self.reward_penalty, scores
+                    )
                     # import pdb
 
                     # pdb.set_trace()
@@ -705,27 +750,31 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     # https://github.com/huggingface/trl/blob/
                     #   f5168fdbaf9cbf6a3f1bdc64dc44b9db3a9ae333/trl/trainer/ppov2_trainer.py#L359
                     logprobs = torch.where(padding_masks, INVALID_LOGPROBS, logprobs)
-                    ref_logprobs = torch.where(padding_masks, INVALID_LOGPROBS, ref_logprobs)
+                    ref_logprobs = torch.where(
+                        padding_masks, INVALID_LOGPROBS, ref_logprobs
+                    )
 
                     # values are masked after the first padding token
                     # see https://github.com/huggingface/trl/blob/f5168fdbaf9cbf6a3f1bdc64dc44b9db3a9ae333/
                     #   trl/trainer/ppov2_trainer.py#L354
                     # and the link to the excalidaw therein for a visual explanation
                     value_seq_idxs = torch.where(
-                        (seq_idxs > 0) & (seq_idxs < self.max_generated_tokens - 1),
-                        seq_idxs + 1,
-                        seq_idxs,
+                        (seq_lens > 0) & (seq_lens < self.max_generated_tokens - 1),
+                        seq_lens + 1,
+                        seq_lens,
                     )
                     value_padding_masks = padding_masks.clone()
                     value_padding_masks[
                         torch.arange(batch_size, device=input_ids.device),
                         value_seq_idxs,
                     ] = False
-                    values = values[:, context_length - 1 : -1].squeeze(-1)  # [b, max_generated_tokens]
+                    values = values[:, context_length - 1 : -1].squeeze(
+                        -1
+                    )  # [b, max_generated_tokens]
 
                     values = torch.where(value_padding_masks, 0.0, values)
                     # [b, max_generated_tokens]
-                    rewards, kl, kl_rewards = ppo_utils.get_rewards(
+                    rewards, kl, kl_rewards = rlhf.get_rewards(
                         scores,
                         logprobs,
                         ref_logprobs,
@@ -736,17 +785,19 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                         # shifting mean is disabled for rewards
                         # https://github.com/huggingface/trl/blob/
                         #   f5168fdbaf9cbf6a3f1bdc64dc44b9db3a9ae333/trl/trainer/ppov2_trainer.py#L373
-                        rewards = ppo_utils.masked_whiten(rewards, ~value_padding_masks, shift_mean=False)
+                        rewards = rlhf.masked_whiten(
+                            rewards, ~value_padding_masks, shift_mean=False
+                        )
                         rewards = torch.where(value_padding_masks, 0.0, rewards)
 
-                    advantages, returns = ppo_utils.estimate_advantages(
+                    advantages, returns = rlhf.estimate_advantages(
                         values, rewards, self.gamma, self.lmbda, masks=~padding_masks
                     )
                     advantages = torch.where(padding_masks, 0.0, advantages)
 
                     # useful for tracking
                     num_eos_tokens = (~reward_penalty_mask).sum().item()
-                    del seq_idxs, value_seq_idxs, responses
+                    del seq_lens, value_seq_idxs, responses
 
                 # import pdb
 
@@ -772,25 +823,39 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                     batch_idxs = torch.randperm(self.batch_size)
                     # batch_idxs = torch.arange(self.batch_size)
                     # print(batch_idxs)
-                    for i in range(0, batch_size, self.ppo_batch_size):
+                    for i in range(0, self.batch_size, self.ppo_batch_size):
                         mini_batch_idxs = batch_idxs[i : i + self.ppo_batch_size]
                         # print(mini_batch_idxs)
                         running_loss = 0
                         running_policy_loss = 0
                         running_vf_loss = 0
-                        for j in range(0, self.ppo_batch_size, self.ppo_backward_batch_size):
-                            backward_batch_idxs = mini_batch_idxs[j : j + self.ppo_backward_batch_size]
+                        for j in range(
+                            0, self.ppo_batch_size, self.ppo_backward_batch_size
+                        ):
+                            backward_batch_idxs = mini_batch_idxs[
+                                j : j + self.ppo_backward_batch_size
+                            ]
 
                             backward_returns = returns[backward_batch_idxs]
                             backward_advantages = advantages[backward_batch_idxs]
                             backward_logprobs = logprobs[backward_batch_idxs]
-                            backward_query_responses = query_responses[backward_batch_idxs]
-                            backward_masks = masks[backward_batch_idxs] if masks is not None else None
+                            backward_query_responses = query_responses[
+                                backward_batch_idxs
+                            ]
+                            backward_masks = (
+                                masks[backward_batch_idxs]
+                                if masks is not None
+                                else None
+                            )
                             backward_position_ids = (
-                                position_ids[backward_batch_idxs] if position_ids is not None else None
+                                position_ids[backward_batch_idxs]
+                                if position_ids is not None
+                                else None
                             )
                             backward_padding_masks = padding_masks[backward_batch_idxs]
-                            backward_value_padding_masks = value_padding_masks[backward_batch_idxs]
+                            backward_value_padding_masks = value_padding_masks[
+                                backward_batch_idxs
+                            ]
                             backward_values = values[backward_batch_idxs]
                             # print(f"backwards q r shape: {backward_query_responses.shape}")
                             # print(f"logprob = backward logprobs: {logprobs[0] == backward_logprobs}")
@@ -818,18 +883,26 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                             pi_logprobs = torch.gather(
                                 F.log_softmax(pi_logits, dim=-1),
                                 2,
-                                backward_query_responses[:, context_length:].unsqueeze(-1),
+                                backward_query_responses[:, context_length:].unsqueeze(
+                                    -1
+                                ),
                             ).squeeze(-1)
 
-                            pi_logprobs = torch.where(backward_padding_masks, INVALID_LOGPROBS, pi_logprobs)
+                            pi_logprobs = torch.where(
+                                backward_padding_masks, INVALID_LOGPROBS, pi_logprobs
+                            )
                             phi_values = self._value_model(
                                 backward_query_responses,
                                 input_pos=backward_position_ids,
                                 mask=backward_masks,
                             )
 
-                            phi_values = phi_values[:, context_length - 1 : -1].squeeze(-1)
-                            phi_values = torch.where(backward_value_padding_masks, 0.0, phi_values)
+                            phi_values = phi_values[:, context_length - 1 : -1].squeeze(
+                                -1
+                            )
+                            phi_values = torch.where(
+                                backward_value_padding_masks, 0.0, phi_values
+                            )
                             loss, policy_loss, value_loss = self._loss_fn(
                                 backward_logprobs,
                                 pi_logprobs,
@@ -857,16 +930,22 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
                             with torch.no_grad():
                                 prob_dist = F.softmax(pi_logits, dim=-1)
-                                entropy = torch.logsumexp(pi_logits, dim=-1) - torch.sum(prob_dist * pi_logits, dim=-1)
+                                entropy = torch.logsumexp(
+                                    pi_logits, dim=-1
+                                ) - torch.sum(prob_dist * pi_logits, dim=-1)
                                 entropies.append(entropy.mean())
-                                approx_policy_kls.append((0.5 * (pi_logprobs - backward_logprobs).pow(2)).mean())
+                                approx_policy_kls.append(
+                                    (
+                                        0.5 * (pi_logprobs - backward_logprobs).pow(2)
+                                    ).mean()
+                                )
                                 # losses.append(loss.detach().item())
                                 # policy_losses.append(policy_loss.item())
                                 # value_losses.append(value_loss.item())
                             del (
                                 pi_logits,
                                 pi_logprobs,
-                                backward_logprobs,
+                                backward_logproz_bs,
                                 backward_query_responses,
                                 backward_masks,
                                 backward_position_ids,
@@ -888,7 +967,9 @@ class PPORecipeSingleDevice(FTRecipeInterface):
             self.epochs_run += 1
             # self.save_checkpoint(epoch=curr_epoch)
             pbar.update(1)
-            pbar.set_description(f"Epoch: {curr_epoch+1}| reward: {rewards.sum(1).mean()}")
+            pbar.set_description(
+                f"Epoch: {curr_epoch+1}| reward: {rewards.sum(1).mean()}"
+            )
 
             kl = logprobs - ref_logprobs
             log_dict = {
@@ -915,12 +996,14 @@ class PPORecipeSingleDevice(FTRecipeInterface):
 
             with torch.no_grad():
                 toks = torch.tensor(
-                    self._tokenizer.encode("The room was decorated with a", add_eos=False, add_bos=False)
+                    self._tokenizer.encode(
+                        "The room was decorated with a", add_eos=False, add_bos=False
+                    )
                 )
                 context_len = len(toks)
                 toks = toks.to(self._device).unsqueeze(0)
 
-                outputs, _ = ppo_utils.generate(
+                outputs, _ = rlhf.generate_with_logits(
                     model=self._model,
                     prompt=toks,
                     max_generated_tokens=50,
@@ -940,13 +1023,13 @@ class PPORecipeSingleDevice(FTRecipeInterface):
                 # table = wandb.Table(columns=columns, data=data)
                 # self._metric_logger.log("query responses", table, step=self.global_step)
                 # except ImportError:
-                eos_mask, responses = ppo_utils.truncate_sequence_at_first_stop_token(
+                eos_mask, responses = rlhf.truncate_sequence_at_first_stop_token(
                     outputs.clone(), self.stop_token_ids, self._tokenizer.pad_id
                 )
                 padding_masks = responses == self._tokenizer.pad_id
 
-                seq_idxs = utils.get_last_unmasked_token_idx(padding_masks)
-                print(seq_idxs)
+                seq_lens = utils.get_unmasked_sequence_lengths(padding_masks)
+                print(seq_lens)
                 print("completion", query_response)
                 print(
                     "completion truncated",
@@ -991,7 +1074,7 @@ def recipe_main(cfg: DictConfig) -> None:
     recipe.setup(cfg=cfg)
     recipe.train()
     torch.save(recipe._model.state_dict(), "model.pt")
-    torch.save(recipe._value_model.state_dict(), "model.pt")
+    torch.save(recipe._value_model.state_dict(), "value_model.pt")
     recipe.cleanup()
 
 
