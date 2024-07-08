@@ -292,6 +292,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             utils.set_activation_checkpointing(policy_model, auto_wrap_policy={modules.TransformerDecoderLayer})
             utils.set_activation_checkpointing(value_model, auto_wrap_policy={modules.TransformerDecoderLayer})
 
+        policy_model.load_state_dict(model_state_dict)
+        ref_policy_model.load_state_dict(model_state_dict)
+
         reward_missing, reward_unexpected = reward_model.load_state_dict(reward_model_state_dict, strict=False)
         value_missing, value_unexpected = value_model.load_state_dict(reward_model_state_dict, strict=False)
 
@@ -475,9 +478,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         del ref_logits
 
-        import pdb
-
-        pdb.set_trace()
         # step 3. estimate values from the generated responses using the value function
         values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
         values = rlhf.query_response_logits_to_response_logits(values, context_length).squeeze(
@@ -597,7 +597,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 ppo_stats = [
                     [],
                 ] * 6
-                for epoch_idx in range(self.ppo_epochs):
+                for _ in range(self.ppo_epochs):
                     batch_idxs = torch.randperm(self.batch_size, device=self._device)
                     for i in range(0, self.batch_size, self.ppo_batch_size):
                         mini_batch_idxs = batch_idxs[i : i + self.ppo_batch_size]
