@@ -189,6 +189,12 @@ _ALL_RECIPES = [
         supports_distributed=False,
     ),
     Recipe(
+        name="ppo_full_finetune_single_device",
+        file_path="ppo_full_finetune_single_device.py",
+        configs=[],
+        supports_distributed=False,
+    ),
+    Recipe(
         name="lora_finetune_distributed",
         file_path="lora_finetune_distributed.py",
         configs=[

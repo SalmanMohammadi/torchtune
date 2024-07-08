@@ -33,29 +33,24 @@ def truncate_sequence_at_first_stop_token(
     return padding_mask, sequences
 
 
-def logits_to_logprobs(
-    logits: torch.Tensor, sequences: torch.Tensor, temperature: float = 1.0
-) -> torch.Tensor:
+def logits_to_logprobs(logits: torch.Tensor, sequences: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
     """
     Converts logits corresponding to a generated sequence to logprobs over the generated tokens.
     Args:
         logits (torch.Tensor): The logits tensor of shape [b, response_length, vocab_size].
         sequences (torch.Tensor): The responses tensor of shape [b, response_length].
-        temperature (float): The temperature to scale the logits.
+        temperature (float): The temperature to scale the logits. Default 1.0
     Returns:
         torch.Tensor: The log probabilities corresponding to each token in `sequences`. Shape [b, response_length].
     """
-    logits /= temperature
     return torch.gather(
-        F.log_softmax(logits, dim=-1),
+        F.log_softmax(logits / temperature, dim=-1),
         2,
         sequences.unsqueeze(-1),
     ).squeeze(-1)
 
 
-def query_response_logits_to_response_logits(
-    query_response_logits: torch.Tensor, context_length: int
-) -> torch.Tensor:
+def query_response_logits_to_response_logits(query_response_logits: torch.Tensor, context_length: int) -> torch.Tensor:
     """
     Converts logits estimated over a query-generated-response pair logits to logits for the response.
     See the excalidraw linked in TRL's PPOV2 for a visual explanation

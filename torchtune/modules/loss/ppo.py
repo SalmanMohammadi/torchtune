@@ -53,7 +53,7 @@ class PPOLoss(nn.Module):
         returns: torch.Tensor,
         padding_masks: Optional[torch.Tensor] = None,
         value_padding_masks: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass of the PPO loss module.
 
@@ -69,48 +69,33 @@ class PPOLoss(nn.Module):
                 where True indicates the corresponding loss values should participage in value loss calculation.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing:
                 - loss: The total PPO loss.
                 - policy_loss: The policy function loss.
                 - value_loss: The value function loss.
+                - ratios: The ratio between the current and old policy probabilities.
+                - clipfrac: The fraction of ratios that were clipped.
+
+
         """
         ratios = torch.exp(pi_logprobs - pi_old_logprobs)
-        # print(f"Pi logprobs mean: {pi_logprobs.mean()}")
-        # print(f"pi old logprobs mean: {pi_old_logprobs.mean()}")
-        # print(f"ratio: {ratios.mean()}, std: {ratios.std()}")
         clipped_ratios = torch.clamp(ratios, 1.0 - self.epsilon, 1.0 + self.epsilon)
-        # print(f"clipped_ratios: {clipped_ratios.mean()}")
+
         policy_losses_clipped = -advantages * clipped_ratios
         policy_losses_unclipped = -advantages * ratios
 
         clipfrac = (policy_losses_clipped > policy_losses_unclipped).float()
-        clipfrac = (
-            clipfrac.mean()
-            if padding_masks is None
-            else rlhf.masked_mean(clipfrac, padding_masks)
-        )
-        # print(
-        #     f"clipfrac: {ppo_ut;ils.masked_mean((policy_losses_clipped > s
-        # print(f"policy_losses_clipped: {ppo_utils.masked_mean(policy_losses_clipped, padding_masks)}")
-        # print(f"policy_losses_clipped no masked mean: {policy_losses_clipped.mean()}")
-        # taking max instead of min to minimise loss
-        # print(f"policy_losses unclipped: {ppo_utils.masked_mean(policy_losses_unclipped, padding_masks)}")
-        # print(f"policy_losses unclipped no masked mean: {policy_losses_unclipped.mean()}")
+        clipfrac = clipfrac.mean() if padding_masks is None else rlhf.masked_mean(clipfrac, padding_masks)
+
         policy_loss = torch.maximum(policy_losses_clipped, policy_losses_unclipped)
-        policy_loss = (
-            policy_loss.mean()
-            if padding_masks is None
-            else rlhf.masked_mean(policy_loss, padding_masks)
-        )
-        # print(f"final policy_loss: {policy_loss}")
+        policy_loss = policy_loss.mean() if padding_masks is None else rlhf.masked_mean(policy_loss, padding_masks)
+
         values_clipped = torch.clamp(
             phi_values,
             phi_old_values - self.value_clip_range,
             phi_old_values + self.value_clip_range,
         )
-        value_loss = torch.maximum(
-            (phi_values - returns) ** 2, (values_clipped - returns) ** 2
-        )
+        value_loss = torch.maximum((phi_values - returns) ** 2, (values_clipped - returns) ** 2)
         value_loss = (
             0.5 * value_loss.mean()
             if value_padding_masks is None

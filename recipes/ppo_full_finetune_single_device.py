@@ -8,7 +8,7 @@ import os
 import sys
 from functools import partial
 from itertools import chain
-from typing import Any, Dict, Generator, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
 from warnings import warn
 
 import torch
@@ -25,31 +25,19 @@ from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
 
-Trajectory = NamedTuple[
+Trajectory = NamedTuple(
     "Trajectory",
     [
         ("query_responses", torch.Tensor),
         ("logprobs", torch.Tensor),
         ("ref_logprobs", torch.Tensor),
         ("values", torch.Tensor),
-        ("masks", Any[torch.Tensor]),
-        ("position_ids", Any[torch.Tensor]),
+        ("masks", torch.Tensor),
+        ("position_ids", torch.Tensor),
         ("response_padding_masks", torch.Tensor),
         ("value_padding_masks", torch.Tensor),
         ("value_seq_idxs", torch.Tensor),
         ("scores", torch.Tensor),
-    ],
-]
-
-PPOStats = NamedTuple(
-    "PPOStats",
-    [
-        ("loss", []),
-        ("policy_loss", []),
-        ("value_loss", []),
-        ("approx_policy_kl", []),
-        ("ratios", []),
-        ("clipfrac", []),
     ],
 )
 
@@ -57,7 +45,8 @@ PPOStats = NamedTuple(
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     def __init__(self, cfg: DictConfig) -> None:
 
-        self._device = utils.get_device(device=cfg.device)
+        # self._device = utils.get_device(device=cfg.device)
+        self._device = torch.device("mps")
         # Reduced precision logic
         self._dtype = utils.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
@@ -303,11 +292,17 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             utils.set_activation_checkpointing(policy_model, auto_wrap_policy={modules.TransformerDecoderLayer})
             utils.set_activation_checkpointing(value_model, auto_wrap_policy={modules.TransformerDecoderLayer})
 
-        policy_model.load_state_dict(model_state_dict)
-        ref_policy_model.load_state_dict(model_state_dict)
+        reward_missing, reward_unexpected = reward_model.load_state_dict(reward_model_state_dict, strict=False)
+        value_missing, value_unexpected = value_model.load_state_dict(reward_model_state_dict, strict=False)
 
-        reward_model.load_state_dict(reward_model_state_dict)
-        value_model.load_state_dict(reward_model_state_dict)
+        assert (
+            reward_missing == value_missing == []
+        ), f"Missing keys in reward ({reward_missing}) and value model ({value_missing}) state dicts."
+
+        if reward_unexpected or value_unexpected:
+            assert (
+                reward_unexpected == value_unexpected == ["output.bias"]
+            ), f"Unexpected keys in reward ({reward_unexpected}) and value model ({value_unexpected}) state dicts."
 
         # Validate model was loaded in with the expected dtype.
         utils.validate_expected_param_dtype(value_model.named_parameters(), dtype=self._dtype)
@@ -319,7 +314,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         utils.validate_expected_param_dtype(value_model.named_parameters(), dtype=self._dtype)
         log.info(f"Value model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(self.ref_policy_model.named_parameters(), dtype=self._dtype)
+        utils.validate_expected_param_dtype(ref_policy_model.named_parameters(), dtype=self._dtype)
         log.info(f"Ref model is initialized with precision {self._dtype}.")
 
         # disabling dropout if found
@@ -416,7 +411,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             drop_last=True,
         )
 
-        def repeat_generator(dataloader: DataLoader) -> Generator[torch.Tensor]:
+        def repeat_generator(dataloader: DataLoader) -> Iterator[torch.Tensor]:
             # infinite generator for when num_steps > len(dataloader) // self.batch_size
             while True:
                 yield from dataloader
@@ -434,7 +429,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         Returns:
             Trajectory (NamedTuple): A collection of tensors corresponding to the current trajectory:
-
             - query_responses (torch.Tensor): generated responses with shape [b, max_generated_tokens]
             - logprobs (torch.Tensor): log probabilities of the generated responses with shape [b, max_generated_tokens]
             - ref_logprobs (torch.Tensor): log probabilities of the generated responses using the reference policy with shape [b, max_generated_tokens]
@@ -447,7 +441,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             - scores (torch.Tensor): scores from the reward model with shape [b]
 
         """
-        _, context_length = input_ids.shape
+        batch_size, context_length = input_ids.shape
 
         # step 1: generate responses, and logits corresponding to the responses using the policy
         query_responses, logits = rlhf.generate_with_logits(
@@ -458,7 +452,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             top_k=self.top_k,
             pad_id=self._tokenizer.pad_id,
         )
-
+        responses = query_responses[:, context_length:].clone()
         query_response_padding_masks = query_responses == self._tokenizer.pad_id
 
         # step 1.1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
@@ -468,19 +462,22 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         del query_response_padding_masks
 
-        # step 2. estimate log probabilities of the generated responses using the current policy
+        # step 2. estimate logprobs of the generated responses using the current policy
         logits = logits[:, context_length - 1 :]  # [b, max_generated_tokens, vocab_size]
         logprobs = rlhf.logits_to_logprobs(logits, responses, self.temperature)
 
         del logits
 
-        # step 2.1 estimate log probabilities of the generated responses using the reference policy
+        # step 2.1 estimate logprobs of the generated responses using the reference policy
         ref_logits = self._ref_policy_model(query_responses, input_pos=position_ids, mask=masks)
         ref_logits = rlhf.query_response_logits_to_response_logits(ref_logits, context_length)
         ref_logprobs = rlhf.logits_to_logprobs(ref_logits, responses, self.temperature)
 
         del ref_logits
 
+        import pdb
+
+        pdb.set_trace()
         # step 3. estimate values from the generated responses using the value function
         values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
         values = rlhf.query_response_logits_to_response_logits(values, context_length).squeeze(
@@ -488,7 +485,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )  # [b, max_generated_tokens]
 
         # step 4. replace any tokens in the response after the first stop token (usually EOS token) with padding
-        responses = query_responses[:, context_length:].clone()
         response_padding_masks, responses = rlhf.truncate_sequence_at_first_stop_token(
             responses, self.stop_token_ids, self._tokenizer.pad_id
         )
@@ -504,7 +500,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # step 5.1 the reward scores from the reward model are the logits for the last non-padding token in each query+response pair
         seq_lens = utils.get_unmasked_sequence_lengths(response_padding_masks)
-        scores = scores[torch.arange(0, self.batch_size), seq_lens + context_length].squeeze(-1)
+        scores = scores[torch.arange(batch_size), seq_lens + context_length].squeeze(-1)
 
         # step 5.2 if configured, apply any penalties for sequences without EOS tokens or shorter than a certain length
         if self.penalise_no_eos or self.min_response_length:
@@ -528,7 +524,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
         value_padding_masks = response_padding_masks.clone()
         value_padding_masks[
-            torch.arange(self.batch_size, device=value_padding_masks.device),
+            torch.arange(batch_size, device=value_padding_masks.device),
             value_seq_idxs,
         ] = False
 
@@ -553,21 +549,21 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             for batch_start in range(0, self.batch_size, self.forward_batch_size):
                 batch_input_ids = input_ids[batch_start : batch_start + self.forward_batch_size]
                 trajectories.append(self.generate_trajectory(batch_input_ids))
-        return Trajectory(*map(torch.stack, zip(*trajectories)))
+        return Trajectory(*map(torch.cat, zip(*trajectories)))
 
     def train(self) -> None:
         """
         The core training loop."""
+        pbar = tqdm(total=self.total_epochs)
         for curr_epoch in range(self.epochs_run, self.total_epochs):
             self._sampler.set_epoch(curr_epoch)
 
             with self._profiler:
 
-                pbar = tqdm(total=self.total_epochs)
                 if self._profiler_enabled:
                     self._profiler.step()
 
-                batch = next(self._dataloader).to(self.device)
+                batch = next(self._dataloader).to(self._device)
                 _, context_length = batch.shape
 
                 # step 1. generate the trajectory using:
@@ -576,9 +572,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 # - the reference frozen policy model (pi_theta_0)
                 trajectory = self.generate_trajectory_batched(batch)
 
-                # step 2. get the rewards for the current trajectory:
-                #   these are based on the divergence between the current policy and the reference policy
-                #   and the scores from the reward model
+                # step 2. get the rewards for the current trajectory. these are based on:
+                #   - the divergence between the current policy and the reference policy
+                #   - the scores from the reward model
                 rewards, kl, kl_rewards = rlhf.get_rewards(
                     trajectory.scores,
                     trajectory.logprobs,
@@ -593,16 +589,16 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     rewards,
                     self.gamma,
                     self.lmbda,
-                    masks=~trajectory.padding_masks,
+                    masks=~trajectory.response_padding_masks,
                 )
-                advantages[trajectory.padding_masks] = 0.0
+                advantages[trajectory.response_padding_masks] = 0.0
 
                 # step 4. optimise using the PPO objective over multiple epochs
                 ppo_stats = [
                     [],
                 ] * 6
                 for epoch_idx in range(self.ppo_epochs):
-                    batch_idxs = torch.randperm(self.batch_size)
+                    batch_idxs = torch.randperm(self.batch_size, device=self._device)
                     for i in range(0, self.batch_size, self.ppo_batch_size):
                         mini_batch_idxs = batch_idxs[i : i + self.ppo_batch_size]
 
@@ -620,7 +616,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 )
                             )
 
-                            backward_ppo_stats = self.ppo_step(batch_trajectory, advantages, returns, context_length)
+                            backward_ppo_stats = self.ppo_step(
+                                batch_trajectory,
+                                advantages[backward_batch_idxs],
+                                returns[backward_batch_idxs],
+                                context_length,
+                            )
 
                             batch_ppo_stats = [
                                 stat + bstat for stat, bstat in zip(batch_ppo_stats, backward_ppo_stats)
@@ -646,6 +647,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             )
             self.kl_controller.update(kl.sum(1).mean().item(), self.global_step)
             self.cleanup_step(trajectory, advantages, returns, kl, kl_rewards)
+            pbar.update(1)
 
     def ppo_step(
         self,
@@ -686,8 +688,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             mask=trajectory.masks,
         )
         pi_logits = rlhf.query_response_logits_to_response_logits(pi_logits, context_length)
-        pi_logprobs = rlhf.logits_to_logprobs(pi_logits, trajectory.responses, self.temperature)
-        pi_logprobs[trajectory.padding_masks] = 1.0
+        pi_logprobs = rlhf.logits_to_logprobs(
+            pi_logits, trajectory.query_responses[:, context_length:], self.temperature
+        )
+        pi_logprobs[trajectory.response_padding_masks] = 1.0
 
         # sesimate the values from the value function at the current optimisation step
         phi_values = self._value_model(
@@ -707,7 +711,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             trajectory.values,
             phi_values,
             returns,
-            padding_masks=~trajectory.padding_masks,
+            padding_masks=~trajectory.response_padding_masks,
             value_padding_masks=~trajectory.value_padding_masks,
         )
 
@@ -739,7 +743,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         Log metrics and statistics for the current step to the metric logger.
         """
         log_dict = {
-            "entropy": -trajectory.logprobs.sum(1).mean(),
             "scores": trajectory.scores.mean(),
             "num_stop_tokens": trajectory.response_padding_masks.any(-1).sum(),
             "rlhf_reward": trajectory.scores.mean() + kl_rewards.sum(1).mean(),
@@ -754,7 +757,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         }
         self._metric_logger.log_dict(log_dict, step=self.global_step)
 
-    def cleanup_epoch(
+    def cleanup_step(
+        self,
         trajectory: Trajectory,
         advantages: torch.Tensor,
         returns: torch.Tensor,

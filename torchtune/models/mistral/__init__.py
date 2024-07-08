@@ -11,10 +11,8 @@ from ._component_builders import (
     mistral_classifier,
 )
 from ._convert_weights import (  # noqa
-    hf_to_tune_lm,
     mistral_reward_hf_to_tune,
     mistral_reward_tune_to_hf,
-    tune_to_hf_lm,
 )
 from ._model_builders import (
     lora_mistral_7b,

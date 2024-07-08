@@ -65,9 +65,7 @@ def get_causal_mask(
         torch.Tensor: Boolean causal mask with shape [bsz x seq_length x seq_length]
     """
     _, seq_len = padding_mask.shape
-    mask = torch.tril(
-        torch.ones(seq_len, seq_len, device=padding_mask.device, dtype=bool), diagonal=0
-    )
+    mask = torch.tril(torch.ones(seq_len, seq_len, device=padding_mask.device, dtype=bool), diagonal=0)
     mask = mask & (padding_mask[:, None, :] & padding_mask[:, :, None])
     mask.diagonal(dim1=1, dim2=2)[:] = True
     return mask
@@ -89,18 +87,12 @@ def generate_with_logits(
     Args:
         model (TransformerDecoder): model used for generation
         prompt (torch.Tensor): tensor with the token IDs associated with the given prompt,
-            with shape either [seq_length] or [bsz x seq_length]. Padded sequences should be
-            left-padded with `pad_id` for sequence collation.
+            with shape either [seq_length] or [bsz x seq_length].
         max_generated_tokens (int): number of tokens to be generated
         pad_id (int): token ID to use for padding, default 0.
         temperature (float): value to scale the predicted logits by, default 1.0.
         top_k (Optional[int]): If specified, we prune the sampling to only token ids within the top_k probabilities,
             default None.
-        stop_tokens (Optional[List[int]]): If specified, generation is stopped when any of these tokens are generated,
-            default None.
-        custom_generate_next_token (Optional[Callable]): If specified, we'll use the ``custom_generate_next_token function``.
-            This is generally only useful if you want to specify a ``torch.compile`` version of the generate next token for
-            performance reasons. If None, we use the default ``generate_next_token`` function. Default is None.
 
     Examples:
         >>> model = torchtune.models.llama3.llama3_8b()
@@ -111,7 +103,7 @@ def generate_with_logits(
         ?? ?? ?? Hi my name is Jeremy and I'm a friendly language model assistant!
 
     Returns:
-        List[List[int]]: collection of lists of generated tokens
+        torch.Tensor: Generated tokens.
     """
     prompt = prompt.view(1, -1) if prompt.ndim == 1 else prompt
 
@@ -126,9 +118,7 @@ def generate_with_logits(
             input_pos = input_pos.to(torch.int)
         else:
             mask = None
-            input_pos = torch.arange(
-                0, prompt_length + i, device=generated_tokens.device
-            )
+            input_pos = torch.arange(0, prompt_length + i, device=generated_tokens.device)
 
         logits, tokens = generate_next_token_with_logits(
             model,

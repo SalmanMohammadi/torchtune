@@ -16,10 +16,8 @@ from torchtune import utils
 
 from torchtune.models import convert_weights
 from torchtune.models.mistral import (
-    hf_to_tune_lm,
     mistral_reward_hf_to_tune,
     mistral_reward_tune_to_hf,
-    tune_to_hf_lm,
 )
 from torchtune.models.phi3 import phi3_hf_to_tune, phi3_tune_to_hf
 from torchtune.utils._checkpointing._checkpointer_utils import (
@@ -94,11 +92,9 @@ class _CheckpointerInterface(Protocol):
 
     """
 
-    def load_checkpoint(self, **kwargs) -> Dict[str, Any]:
-        ...
+    def load_checkpoint(self, **kwargs) -> Dict[str, Any]: ...
 
-    def save_checkpoint(self, state_dict: Dict[str, Any], **kwargs) -> None:
-        ...
+    def save_checkpoint(self, state_dict: Dict[str, Any], **kwargs) -> None: ...
 
 
 class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
@@ -136,11 +132,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
                 "Checkpointer expects a valid .pt file."
             )
 
-        self._adapter_checkpoint = (
-            get_path(self._checkpoint_dir, adapter_checkpoint)
-            if adapter_checkpoint
-            else None
-        )
+        self._adapter_checkpoint = get_path(self._checkpoint_dir, adapter_checkpoint) if adapter_checkpoint else None
 
         self._resume_from_checkpoint = resume_from_checkpoint
         self._model_type = model_type
@@ -151,9 +143,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
         self._recipe_checkpoint = None
         if self._resume_from_checkpoint:
             if recipe_checkpoint is None:
-                raise ValueError(
-                    "If resume_from_checkpoint is True, recipe_checkpoint file must be provided."
-                )
+                raise ValueError("If resume_from_checkpoint is True, recipe_checkpoint file must be provided.")
             self._recipe_checkpoint = get_path(self._checkpoint_dir, recipe_checkpoint)
 
     def load_checkpoint(self, weights_only: bool = True) -> Dict[str, Any]:
@@ -179,9 +169,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
             Dict[str, Any]: state_dict from the input checkpoint
         """
         state_dict: Dict[str:Any] = {}
-        state_dict[utils.MODEL_KEY] = safe_torch_load(
-            self._checkpoint_path, weights_only=weights_only
-        )
+        state_dict[utils.MODEL_KEY] = safe_torch_load(self._checkpoint_path, weights_only=weights_only)
 
         if self._adapter_checkpoint:
             adapter_state_dict = safe_torch_load(self._adapter_checkpoint)
@@ -226,9 +214,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
         self._output_dir.mkdir(exist_ok=True)
 
         # Output file is always a .pt file with the epoch number in the name
-        checkpoint_file = Path.joinpath(
-            self._output_dir, f"torchtune_model_{epoch}"
-        ).with_suffix(".pt")
+        checkpoint_file = Path.joinpath(self._output_dir, f"torchtune_model_{epoch}").with_suffix(".pt")
         torch.save(state_dict[utils.MODEL_KEY], checkpoint_file)
         logger.info(
             "Model checkpoint of size "
@@ -237,9 +223,7 @@ class FullModelTorchTuneCheckpointer(_CheckpointerInterface):
         )
 
         if utils.ADAPTER_KEY in state_dict:
-            output_path = Path.joinpath(
-                self._output_dir, f"adapter_{epoch}"
-            ).with_suffix(".pt")
+            output_path = Path.joinpath(self._output_dir, f"adapter_{epoch}").with_suffix(".pt")
             logger.info(
                 "Adapter checkpoint of size "
                 f"{os.path.getsize(output_path) / 1000**3:.2f} GB "
@@ -301,11 +285,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
     ) -> None:
         self._checkpoint_dir = Path(checkpoint_dir)
         self._checkpoint_paths = self._validate_hf_checkpoint_files(checkpoint_files)
-        self._adapter_checkpoint = (
-            get_path(self._checkpoint_dir, adapter_checkpoint)
-            if adapter_checkpoint
-            else None
-        )
+        self._adapter_checkpoint = get_path(self._checkpoint_dir, adapter_checkpoint) if adapter_checkpoint else None
 
         self._model_type = ModelType[model_type]
         self._output_dir = Path(output_dir)
@@ -317,9 +297,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         self._weight_map: Dict[str, str] = None
 
         # the config.json file contains model params needed for state dict conversion
-        self._config = json.loads(
-            Path.joinpath(self._checkpoint_dir, "config.json").read_text()
-        )
+        self._config = json.loads(Path.joinpath(self._checkpoint_dir, "config.json").read_text())
 
         # save config.json to output_dir
         save_config(self._output_dir, self._config)
@@ -329,9 +307,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         self._recipe_checkpoint = None
         if self._resume_from_checkpoint:
             if recipe_checkpoint is None:
-                raise ValueError(
-                    "If resume_from_checkpoint is True, recipe_checkpoint file must be provided."
-                )
+                raise ValueError("If resume_from_checkpoint is True, recipe_checkpoint file must be provided.")
             self._recipe_checkpoint = get_path(self._checkpoint_dir, recipe_checkpoint)
 
     def _validate_hf_checkpoint_files(self, checkpoint_files: List[str]) -> List[Path]:
@@ -378,8 +354,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                 # will break recipe code
                 if not isinstance(value, torch.Tensor):
                     raise ValueError(
-                        f"Expected all values in the state dict to be torch.Tensor. "
-                        f"Found {type(value)} instead."
+                        f"Expected all values in the state dict to be torch.Tensor. " f"Found {type(value)} instead."
                     )
                 # idx is written in the 4 digit format (eg: 0001, 0002, etc.)
                 self._weight_map[key] = f"{cpt_idx+1:04}"
@@ -484,9 +459,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
 
         # write the partitioned state dicts to the right checkpoint file
         for cpt_idx, model_state_dict in split_state_dicts.items():
-            output_path = Path.joinpath(
-                self._output_dir, f"hf_model_{cpt_idx}_{epoch}"
-            ).with_suffix(".pt")
+            output_path = Path.joinpath(self._output_dir, f"hf_model_{cpt_idx}_{epoch}").with_suffix(".pt")
             torch.save(model_state_dict, output_path)
             logger.info(
                 "Model checkpoint of size "
@@ -497,9 +470,7 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
         if utils.ADAPTER_KEY in state_dict:
             # Save torchtune format adapter weights even if we save PEFT format
             # This way we can resume no matter what (and memory footprint of adapter weights is small)
-            output_path = Path.joinpath(
-                self._output_dir, f"adapter_{epoch}"
-            ).with_suffix(".pt")
+            output_path = Path.joinpath(self._output_dir, f"adapter_{epoch}").with_suffix(".pt")
             torch.save(state_dict[utils.ADAPTER_KEY], output_path)
             logger.info(
                 "Adapter checkpoint of size "
@@ -512,17 +483,13 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
                     "Saving Phi-3 Mini adapter weights to PEFT format is not supported, saving to torchtune format instead"
                 )
             else:
-                state_dict[
-                    utils.ADAPTER_KEY
-                ] = convert_weights.tune_to_peft_adapter_weights(
+                state_dict[utils.ADAPTER_KEY] = convert_weights.tune_to_peft_adapter_weights(
                     state_dict[utils.ADAPTER_KEY],
                     num_heads=self._config["num_attention_heads"],
                     num_kv_heads=self._config["num_key_value_heads"],
                     dim=self._config["hidden_size"],
                 )
-                peft_output_path = Path.joinpath(
-                    self._output_dir, "adapter_model"
-                ).with_suffix(".bin")
+                peft_output_path = Path.joinpath(self._output_dir, "adapter_model").with_suffix(".bin")
                 torch.save(state_dict[utils.ADAPTER_KEY], peft_output_path)
                 logger.info(
                     "Adapter checkpoint of size "
@@ -532,13 +499,9 @@ class FullModelHFCheckpointer(_CheckpointerInterface):
 
         if utils.ADAPTER_CONFIG in state_dict:
             if self._model_type == ModelType.PHI3_MINI:
-                logger.warning(
-                    "PEFT integration for Phi-3 Mini is not supported, skipping adapter config save"
-                )
+                logger.warning("PEFT integration for Phi-3 Mini is not supported, skipping adapter config save")
             else:
-                state_dict[
-                    utils.ADAPTER_CONFIG
-                ] = convert_weights.tune_to_peft_adapter_config(
+                state_dict[utils.ADAPTER_CONFIG] = convert_weights.tune_to_peft_adapter_config(
                     state_dict[utils.ADAPTER_CONFIG]
                 )
                 output_path = Path.joinpath(self._output_dir, "adapter_config.json")
@@ -609,11 +572,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
         self._checkpoint_dir = Path(checkpoint_dir)
         self._checkpoint_path = get_path(self._checkpoint_dir, checkpoint_files[0])
 
-        self._adapter_checkpoint = (
-            get_path(self._checkpoint_dir, adapter_checkpoint)
-            if adapter_checkpoint
-            else None
-        )
+        self._adapter_checkpoint = get_path(self._checkpoint_dir, adapter_checkpoint) if adapter_checkpoint else None
 
         self._resume_from_checkpoint = resume_from_checkpoint
         self._model_type = model_type
@@ -624,9 +583,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
         self._recipe_checkpoint = None
         if self._resume_from_checkpoint:
             if recipe_checkpoint is None:
-                raise ValueError(
-                    "If resume_from_checkpoint is True, recipe_checkpoint file must be provided."
-                )
+                raise ValueError("If resume_from_checkpoint is True, recipe_checkpoint file must be provided.")
             self._recipe_checkpoint = get_path(self._checkpoint_dir, recipe_checkpoint)
 
     def load_checkpoint(self) -> Dict[str, Any]:
@@ -668,9 +625,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
         state_dict[utils.MODEL_KEY] = convert_weights.tune_to_meta(model_state_dict)
 
         # Output file is always a .pt file with the epoch number in the name
-        checkpoint_file = Path.joinpath(
-            self._output_dir, f"meta_model_{epoch}"
-        ).with_suffix(".pt")
+        checkpoint_file = Path.joinpath(self._output_dir, f"meta_model_{epoch}").with_suffix(".pt")
         torch.save(state_dict[utils.MODEL_KEY], checkpoint_file)
         logger.info(
             "Model checkpoint of size "
@@ -679,9 +634,7 @@ class FullModelMetaCheckpointer(_CheckpointerInterface):
         )
 
         if utils.ADAPTER_KEY in state_dict:
-            output_path = Path.joinpath(
-                self._output_dir, f"adapter_{epoch}"
-            ).with_suffix(".pt")
+            output_path = Path.joinpath(self._output_dir, f"adapter_{epoch}").with_suffix(".pt")
             torch.save(state_dict[utils.ADAPTER_KEY], output_path)
             logger.info(
                 "Adapter checkpoint of size "
