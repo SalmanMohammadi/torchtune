@@ -1,8 +1,14 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from functools import partial
 from typing import List, Optional
-from torchtune.modules.common_utils import reparametrize_as_dtype_state_dict_post_hook
 
 from torch import nn
+from torchtune.models.llama2._component_builders import llama2_mlp
 
 from torchtune.models.llama2._model_utils import scale_hidden_dim_for_mlp
 
@@ -14,7 +20,7 @@ from torchtune.modules import (
     TransformerDecoder,
     TransformerDecoderLayer,
 )
-from torchtune.models.llama2._component_builders import llama2_mlp
+from torchtune.modules.common_utils import reparametrize_as_dtype_state_dict_post_hook
 
 
 def llama2(
@@ -73,7 +79,9 @@ def llama2(
         max_seq_len=max_seq_len,
         attn_dropout=attn_dropout,
     )
-    hidden_dim = intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
+    hidden_dim = (
+        intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
+    )
     mlp = llama2_mlp(dim=embed_dim, hidden_dim=hidden_dim)
     layer = TransformerDecoderLayer(
         attn=self_attn,
@@ -151,7 +159,9 @@ def llama2_classifier(
         max_seq_len=max_seq_len,
         attn_dropout=attn_dropout,
     )
-    hidden_dim = intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
+    hidden_dim = (
+        intermediate_dim if intermediate_dim else scale_hidden_dim_for_mlp(embed_dim)
+    )
     mlp = llama2_mlp(dim=embed_dim, hidden_dim=hidden_dim)
     layer = TransformerDecoderLayer(
         attn=self_attn,

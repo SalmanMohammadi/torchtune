@@ -224,7 +224,9 @@ class WandBLogger(MetricLoggerInterface):
                 OmegaConf.save(config, output_config_fname)
 
                 log.info(f"Logging {output_config_fname} to W&B under Files")
-                self._wandb.save(output_config_fname, base_path=output_config_fname.parent)
+                self._wandb.save(
+                    output_config_fname, base_path=output_config_fname.parent
+                )
 
             except Exception as e:
                 log.warning(

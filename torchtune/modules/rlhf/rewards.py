@@ -84,7 +84,9 @@ def get_rewards(
     # https://github.com/openai/lm-human-preferences/blob/cbfd210bb8b08f6bc5c26878c10984b90f516c66/lm_human_preferences/train_policy.py#L153
 
     if valid_score_idxs is not None:
-        total_reward[torch.arange(scores.shape[0], device=scores.device), valid_score_idxs] += scores
+        total_reward[
+            torch.arange(scores.shape[0], device=scores.device), valid_score_idxs
+        ] += scores
     else:
         total_reward[:, -1] += scores
 
@@ -108,7 +110,9 @@ def whiten(x: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
     return whitened
 
 
-def masked_mean(x: torch.Tensor, mask: torch.Tensor, dim: Optional[int] = None) -> torch.Tensor:
+def masked_mean(
+    x: torch.Tensor, mask: torch.Tensor, dim: Optional[int] = None
+) -> torch.Tensor:
     """
     Compute mean of tensor with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
 
@@ -124,7 +128,9 @@ def masked_mean(x: torch.Tensor, mask: torch.Tensor, dim: Optional[int] = None) 
     return (x * mask).sum(dim=dim) / mask.sum(dim=dim)
 
 
-def masked_var(x: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> torch.Tensor:
+def masked_var(
+    x: torch.Tensor, mask: torch.Tensor, unbiased: bool = True
+) -> torch.Tensor:
     """
     Compute variance of tensor with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
 
@@ -157,7 +163,9 @@ def masked_var(x: torch.Tensor, mask: torch.Tensor, unbiased: bool = True) -> to
     return var
 
 
-def masked_whiten(x: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True) -> torch.Tensor:
+def masked_whiten(
+    x: torch.Tensor, mask: torch.Tensor, shift_mean: bool = True
+) -> torch.Tensor:
     """
     Whiten (normalises) values with masked values. Taken from https://github.com/huggingface/trl/blob/main/trl/core.py
     Args:

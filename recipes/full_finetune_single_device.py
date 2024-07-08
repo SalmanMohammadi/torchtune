@@ -483,7 +483,7 @@ class FullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     num_tokens = 0
                     t0 = time.perf_counter()
 
-            self.epochs_run += 1 
+            self.epochs_run += 1
             self.save_checkpoint(epoch=curr_epoch)
 
     def cleanup(self) -> None:

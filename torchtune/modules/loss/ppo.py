@@ -85,17 +85,27 @@ class PPOLoss(nn.Module):
         policy_losses_unclipped = -advantages * ratios
 
         clipfrac = (policy_losses_clipped > policy_losses_unclipped).float()
-        clipfrac = clipfrac.mean() if padding_masks is None else rlhf.masked_mean(clipfrac, padding_masks)
+        clipfrac = (
+            clipfrac.mean()
+            if padding_masks is None
+            else rlhf.masked_mean(clipfrac, padding_masks)
+        )
 
         policy_loss = torch.maximum(policy_losses_clipped, policy_losses_unclipped)
-        policy_loss = policy_loss.mean() if padding_masks is None else rlhf.masked_mean(policy_loss, padding_masks)
+        policy_loss = (
+            policy_loss.mean()
+            if padding_masks is None
+            else rlhf.masked_mean(policy_loss, padding_masks)
+        )
 
         values_clipped = torch.clamp(
             phi_values,
             phi_old_values - self.value_clip_range,
             phi_old_values + self.value_clip_range,
         )
-        value_loss = torch.maximum((phi_values - returns) ** 2, (values_clipped - returns) ** 2)
+        value_loss = torch.maximum(
+            (phi_values - returns) ** 2, (values_clipped - returns) ** 2
+        )
         value_loss = (
             0.5 * value_loss.mean()
             if value_padding_masks is None

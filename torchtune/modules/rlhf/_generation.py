@@ -65,7 +65,9 @@ def get_causal_mask(
         torch.Tensor: Boolean causal mask with shape [bsz x seq_length x seq_length]
     """
     _, seq_len = padding_mask.shape
-    mask = torch.tril(torch.ones(seq_len, seq_len, device=padding_mask.device, dtype=bool), diagonal=0)
+    mask = torch.tril(
+        torch.ones(seq_len, seq_len, device=padding_mask.device, dtype=bool), diagonal=0
+    )
     mask = mask & (padding_mask[:, None, :] & padding_mask[:, :, None])
     mask.diagonal(dim1=1, dim2=2)[:] = True
     return mask
@@ -118,7 +120,9 @@ def generate_with_logits(
             input_pos = input_pos.to(torch.int)
         else:
             mask = None
-            input_pos = torch.arange(0, prompt_length + i, device=generated_tokens.device)
+            input_pos = torch.arange(
+                0, prompt_length + i, device=generated_tokens.device
+            )
 
         logits, tokens = generate_next_token_with_logits(
             model,

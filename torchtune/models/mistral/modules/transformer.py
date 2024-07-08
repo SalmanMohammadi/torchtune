@@ -79,12 +79,16 @@ class TransformerDecoderWithHiddenOutput(nn.Module):
 
         # causal_mask is used during inference to ensure we're attending
         # to the right tokens
-        self.causal_mask = torch.tril(torch.ones(self.max_seq_len, self.max_seq_len, dtype=torch.bool))
+        self.causal_mask = torch.tril(
+            torch.ones(self.max_seq_len, self.max_seq_len, dtype=torch.bool)
+        )
 
     def reset_caches(self):
         """Reset the key value caches."""
         if self.layers[0].attn.kv_cache is None:
-            raise RuntimeError("Key value caches are not setup. Call ``setup_caches()`` first.")
+            raise RuntimeError(
+                "Key value caches are not setup. Call ``setup_caches()`` first."
+            )
 
         for layer in self.layers:
             layer.attn.kv_cache.reset()
@@ -127,9 +131,13 @@ class TransformerDecoderWithHiddenOutput(nn.Module):
 
         if self.causal_mask is not None:
             if input_pos is None:
-                raise ValueError("Caches are setup, but the position of input token is missing")
+                raise ValueError(
+                    "Caches are setup, but the position of input token is missing"
+                )
             if mask is not None:
-                raise ValueError("An attention mask was set. Cannot use a non-causal mask for inference")
+                raise ValueError(
+                    "An attention mask was set. Cannot use a non-causal mask for inference"
+                )
             # shape: [1, input_pos_len, m_s]
             # in most cases input_pos_len should be 1
             mask = self.causal_mask[None, input_pos]
@@ -203,7 +211,9 @@ class TransformerLM(nn.Module):
     Transformer Decoder identical to :class:`~torchtune.modules.TransformerDecoder`
     """
 
-    def __init__(self, decoder: TransformerDecoderWithHiddenOutput, output: nn.Linear) -> None:
+    def __init__(
+        self, decoder: TransformerDecoderWithHiddenOutput, output: nn.Linear
+    ) -> None:
         super().__init__()
         self.decoder = decoder
         self.output = output
