@@ -280,6 +280,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._profiler_enabled = cfg.profiler.enabled
         self._profiler = config.instantiate(cfg.profiler)
 
+    def _setup_batch_sizes(self, cfg: DictConfig):
+        pass
+
     def _setup_checkpointers(
         self,
         policy_cfg: DictConfig,
@@ -647,6 +650,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     def train(self) -> None:
         """
         The core training loop."""
+        # this will be minimum 1, max whatever
+        for curr_epoch in range(self.epochs_run, self.total_epochs):
+            
+            self._sampler.set_epoch(curr_epoch)
+            for 
+            if self.steps_run > self.total_steps:
+                break
         for curr_step in range(self.steps_run, self.total_steps):
 
             self._sampler.set_epoch(curr_step)
