@@ -20,7 +20,9 @@ import torch
 from torch import nn
 from torchtune.modules.tokenizers import SentencePieceTokenizer
 
-skip_if_cuda_not_available = unittest.skipIf(not torch.cuda.is_available(), "CUDA is not available")
+skip_if_cuda_not_available = unittest.skipIf(
+    not torch.cuda.is_available(), "CUDA is not available"
+)
 
 CKPT_MODEL_PATHS = {
     "llama2_tune": "/tmp/test-artifacts/small-ckpt-tune-03082024.pt",

@@ -73,7 +73,7 @@ checkpointer:
       "pytorch_model.bin",
   ]
   # this is the only place where you should update `recipe_checkpoint` if resuming training
-  recipe_checkpoint: null 
+  recipe_checkpoint: null
   output_dir: ${output_dir}
   model_type: LLAMA2
 
@@ -101,7 +101,7 @@ value_checkpointer:
   output_dir: ${output_dir}
   model_type: MISTRAL_REWARD
 
-# checkpointer for the reward model, ensure `checkpoint_files` 
+# checkpointer for the reward model, ensure `checkpoint_files`
 # always points to the original reward model weights, even if resuming training
 reward_checkpointer:
   _component_: torchtune.utils.FullModelHFCheckpointer
@@ -142,7 +142,7 @@ stop_token_ids: [
 ]
   # 29889
 
-# KL controller arguments - 
+# KL controller arguments -
 # kl_controller:
 #   _component_: torchtune.modules.rlhf.AdaptiveKLController
 #   init_kl_coef: 0.15

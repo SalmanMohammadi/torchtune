@@ -11,11 +11,7 @@ import runpy
 import sys
 from pathlib import Path
 
-import numpy as np
-
 import pytest
-
-import torch
 from tests.common import TUNE_PATH
 
 from tests.recipes.utils import (
@@ -79,17 +75,17 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
             checkpointer.checkpoint_files=[{policy_ckpt_path}]\
             checkpointer.output_dir={policy_tmpdir} \
             checkpointer.model_type=LLAMA2 \
-            
+
             ref_policy_checkpointer.checkpoint_dir='{ckpt_dir}' \
             ref_policy_checkpointer.checkpoint_files=[{policy_ckpt_path}]\
-            
+
             value_checkpointer.checkpoint_dir='{ckpt_dir}' \
             value_checkpointer.checkpoint_files=[{reward_ckpt_path}]\
             value_checkpointer.output_dir={value_tmpdir} \
-            
+
             reward_checkpointer.checkpoint_dir='{ckpt_dir}' \
             reward_checkpointer.checkpoint_files=[{reward_ckpt_path}]\
-            
+
             metric_logger._component_=torchtune.utils.metric_logging.DiskLogger \
             metric_logger.filename={log_file} \
         """.split()
@@ -100,10 +96,18 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
 
         reward_and_value_model_config = llama2_classifier_test_config()
         reward_and_value_model_config = [
-            k.replace("model.", "reward_and_value_model.") for k in reward_and_value_model_config
+            k.replace("model.", "reward_and_value_model.")
+            for k in reward_and_value_model_config
         ]
-        reward_and_value_model_config += ["reward_and_value_model.intermediate_dim=null"]
-        cmd_1 = cmd_1 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
+        reward_and_value_model_config += [
+            "reward_and_value_model.intermediate_dim=null"
+        ]
+        cmd_1 = (
+            cmd_1
+            + self._get_test_config_overrides()
+            + model_config
+            + reward_and_value_model_config
+        )
 
         monkeypatch.setattr(sys, "argv", cmd_1)
         with pytest.raises(SystemExit, match=""):
@@ -125,23 +129,28 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
             checkpointer.checkpoint_files=[{os.path.join(policy_tmpdir, "hf_model_0001_1.pt")}]\
             checkpointer.recipe_checkpoint={os.path.join(policy_tmpdir, "recipe_state.pt")}\
             checkpointer.model_type=LLAMA2 \
-            
+
             ref_policy_checkpointer.checkpoint_dir='{ckpt_dir}' \
             ref_policy_checkpointer.checkpoint_files=[{policy_ckpt_path}]\
-            
+
             value_checkpointer.checkpoint_dir='{value_tmpdir}' \
             value_checkpointer.checkpoint_files=[{os.path.join(value_tmpdir, "hf_model_0001_1.pt")}]\
-            
+
             reward_checkpointer.checkpoint_dir='{ckpt_dir}' \
             reward_checkpointer.checkpoint_files=[{reward_ckpt_path}]\
-            
+
             resume_from_checkpoint=True \
             metric_logger._component_=torchtune.utils.metric_logging.DiskLogger \
             metric_logger.filename={resumed_log_file} \
 
         """.split()
 
-        cmd_2 = cmd_2 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
+        cmd_2 = (
+            cmd_2
+            + self._get_test_config_overrides()
+            + model_config
+            + reward_and_value_model_config
+        )
 
         monkeypatch.setattr(sys, "argv", cmd_2)
         with pytest.raises(SystemExit, match=""):
