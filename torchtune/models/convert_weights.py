@@ -118,23 +118,23 @@ def hf_to_tune(
     head_dim: int = None,
 ) -> Dict[str, torch.Tensor]:
     """
-        Convert a state dict from HF's format to torchtune's format. State dicts
-        from multiple checkpoint files should be consolidated into a single state dict
-        before calling this function.
-    '
-        Eg of HF-format state dict can be found in the ``meta-llama/Llama-2-7b-hf``
-        repo in HF (https://huggingface.co/meta-llama/Llama-2-7b-hf).
+    Convert a state dict from HF's format to torchtune's format. State dicts
+    from multiple checkpoint files should be consolidated into a single state dict
+    before calling this function.
 
-        Args:
-            state_dict (Dict[str, torch.Tensor]): State dict in HF's format.
-            num_heads (int): Number of heads in the model.
-            num_kv_heads (int): Number of heads in the key/value projection layers.
-            dim (int): Dimension of the model.
-            head_dim (int): Dimension of the head. If not provided, it will be calculated
-                as dim // num_heads.
+    Eg of HF-format state dict can be found in the ``meta-llama/Llama-2-7b-hf``
+    repo in HF (https://huggingface.co/meta-llama/Llama-2-7b-hf).
 
-        Returns:
-            Dict[str, torch.Tensor]: State dict in torchtune's format.
+    Args:
+        state_dict (Dict[str, torch.Tensor]): State dict in HF's format.
+        num_heads (int): Number of heads in the model.
+        num_kv_heads (int): Number of heads in the key/value projection layers.
+        dim (int): Dimension of the model.
+        head_dim (int): Dimension of the head. If not provided, it will be calculated
+            as dim // num_heads.
+
+    Returns:
+        Dict[str, torch.Tensor]: State dict in torchtune's format.
     """
     converted_state_dict = {}
     if head_dim is None:
