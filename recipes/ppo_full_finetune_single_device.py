@@ -57,21 +57,15 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
         if self._dtype == torch.float16:
-            raise ValueError(
-                "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
-            )
+            raise ValueError("fp16 precision is not supported in this recipe. Please use fp32 or bf16.")
         # For CUDA devices, check if the HW supports bf16 if bf16 is specified.
         if self._dtype == torch.bfloat16 and self._device != torch.device("cpu"):
             if torch.cuda.is_available():
                 if not torch.cuda.is_bf16_supported():
-                    raise RuntimeError(
-                        "Full bf16 training is not supported on this hardware."
-                    )
+                    raise RuntimeError("Full bf16 training is not supported on this hardware.")
             elif torch.backends.mps.is_available():
                 if packaging.version.parse(torch.__version__).release < (2, 3):
-                    raise RuntimeError(
-                        "Full bf16 training is not supported on this hardware."
-                    )
+                    raise RuntimeError("Full bf16 training is not supported on this hardware.")
 
         # logging attributes
         self._output_dir = cfg.output_dir
@@ -127,10 +121,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # If seed or total_steps don't match,
         # warn the user and overwrite
         try:
-            if (
-                self.seed != ckpt_dict[utils.SEED_KEY]
-                or self.total_steps != ckpt_dict[utils.TOTAL_EPOCHS_KEY]
-            ):
+            if self.seed != ckpt_dict[utils.SEED_KEY] or self.total_steps != ckpt_dict[utils.TOTAL_EPOCHS_KEY]:
                 warn(
                     message="""Configured value for seed or total_steps
                     does not match the value stored in checkpoint."""
@@ -170,14 +161,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # load policy checkpoints
         policy_model_checkpoint_dict = self._policy_checkpointer.load_checkpoint()
-        ref_policy_state_dict = ref_policy_checkpointer.load_checkpoint()[
-            utils.MODEL_KEY
-        ]
+        ref_policy_state_dict = ref_policy_checkpointer.load_checkpoint()[utils.MODEL_KEY]
 
         # load reward and value model checkpoints
-        value_model_checkpoint_dict = self._value_checkpointer.load_checkpoint()[
-            utils.MODEL_KEY
-        ]
+        value_model_checkpoint_dict = self._value_checkpointer.load_checkpoint()[utils.MODEL_KEY]
         reward_model_state_dict = reward_checkpointer.load_checkpoint()[utils.MODEL_KEY]
 
         if self._resume_from_checkpoint:
@@ -211,11 +198,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # checkpoint. Transforming the opt state dict is handled by this method
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
-            opt_state_dict=(
-                policy_model_checkpoint_dict[utils.OPT_KEY]
-                if self._resume_from_checkpoint
-                else None
-            ),
+            opt_state_dict=(policy_model_checkpoint_dict[utils.OPT_KEY] if self._resume_from_checkpoint else None),
         )
 
         # GAE hyperparameters
@@ -232,7 +215,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             shuffle=cfg.shuffle,
             batch_size=cfg.batch_size,
         )
+        import pdb
 
+        pdb.set_trace()
         # setup training params:
         # num_steps - global number of optimisation steps (batches)
         # batch_size - number of samples in a batch
@@ -250,9 +235,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 f"ppo_batch_size ({self.ppo_batch_size})  must be "
                 f"exactly divisible by gradient_accumulation_steps ({self._gradient_accumulation_steps})."
             )
-        self.ppo_backward_batch_size = (
-            cfg.ppo_batch_size // self._gradient_accumulation_steps
-        )
+        self.ppo_backward_batch_size = cfg.ppo_batch_size // self._gradient_accumulation_steps
 
         # trajectory generation args
         self.temperature = cfg.temperature
@@ -289,9 +272,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         pdb.set_trace()
         # one "step" is a single gradient update update over a minibatch of trajectories
-        self.global_step = (
-            self.steps_run * self.ppo_epochs * (self.batch_size // self.ppo_batch_size)
-        )
+        self.global_step = self.steps_run * self.ppo_epochs * (self.batch_size // self.ppo_batch_size)
 
         # setup adaptive KL controller
         self.kl_controller = config.instantiate(cfg.kl_controller)
@@ -369,12 +350,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             value_model = config.instantiate(cfg_reward_value_model)
 
         if enable_activation_checkpointing:
-            utils.set_activation_checkpointing(
-                policy_model, auto_wrap_policy={modules.TransformerDecoderLayer}
-            )
-            utils.set_activation_checkpointing(
-                value_model, auto_wrap_policy={modules.TransformerDecoderLayer}
-            )
+            utils.set_activation_checkpointing(policy_model, auto_wrap_policy={modules.TransformerDecoderLayer})
+            utils.set_activation_checkpointing(value_model, auto_wrap_policy={modules.TransformerDecoderLayer})
 
         print("_____________________________")
 
@@ -388,12 +365,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         policy_model.load_state_dict(policy_state_dict)
         ref_policy_model.load_state_dict(ref_policy_state_dict)
 
-        reward_missing, reward_unexpected = reward_model.load_state_dict(
-            reward_model_state_dict, strict=False
-        )
-        value_missing, value_unexpected = value_model.load_state_dict(
-            value_model_state_dict, strict=False
-        )
+        reward_missing, reward_unexpected = reward_model.load_state_dict(reward_model_state_dict, strict=False)
+        value_missing, value_unexpected = value_model.load_state_dict(value_model_state_dict, strict=False)
 
         # some extra validation for HF classifier checkpoints with a `score.bias` present
         assert (
@@ -408,24 +381,16 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             ), f"Unexpected keys in reward ({reward_unexpected}) and value model ({value_unexpected}) state dicts."
 
         # Validate model was loaded in with the expected dtype.
-        utils.validate_expected_param_dtype(
-            value_model.named_parameters(), dtype=self._dtype
-        )
+        utils.validate_expected_param_dtype(value_model.named_parameters(), dtype=self._dtype)
         log.info(f"Base model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(
-            reward_model.named_parameters(), dtype=self._dtype
-        )
+        utils.validate_expected_param_dtype(reward_model.named_parameters(), dtype=self._dtype)
         log.info(f"Reward model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(
-            value_model.named_parameters(), dtype=self._dtype
-        )
+        utils.validate_expected_param_dtype(value_model.named_parameters(), dtype=self._dtype)
         log.info(f"Value model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(
-            ref_policy_model.named_parameters(), dtype=self._dtype
-        )
+        utils.validate_expected_param_dtype(ref_policy_model.named_parameters(), dtype=self._dtype)
         log.info(f"Ref model is initialized with precision {self._dtype}.")
 
         for model in [policy_model, value_model, ref_policy_model, reward_model]:
@@ -499,8 +464,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         if isinstance(cfg_dataset, ListConfig):
             datasets = [
-                config.instantiate(single_cfg_dataset, tokenizer=self._tokenizer)
-                for single_cfg_dataset in cfg_dataset
+                config.instantiate(single_cfg_dataset, tokenizer=self._tokenizer) for single_cfg_dataset in cfg_dataset
             ]
             ds = ConcatDataset(datasets=datasets)
         else:
@@ -578,9 +542,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # step 1.1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
         masks = rlhf.get_causal_mask(~(query_response_padding_masks))
-        position_ids = (~query_response_padding_masks).cumsum(-1) - (
-            ~query_response_padding_masks
-        ).long()
+        position_ids = (~query_response_padding_masks).cumsum(-1) - (~query_response_padding_masks).long()
         position_ids = position_ids.type(torch.int)
 
         del query_response_padding_masks
@@ -592,12 +554,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         del logits
 
         # step 2.1 estimate logprobs of the generated responses using the reference policy
-        ref_logits = self._ref_policy_model(
-            query_responses, input_pos=position_ids, mask=masks
-        )
-        ref_logits = rlhf.query_response_logits_to_response_logits(
-            ref_logits, context_length
-        )
+        ref_logits = self._ref_policy_model(query_responses, input_pos=position_ids, mask=masks)
+        ref_logits = rlhf.query_response_logits_to_response_logits(ref_logits, context_length)
         ref_logprobs = rlhf.logits_to_logprobs(ref_logits, responses, self.temperature)
 
         del ref_logits
@@ -607,9 +565,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             pdb.set_trace()
         # step 3. estimate values from the generated responses using the value function
         values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
-        values = rlhf.query_response_logits_to_response_logits(
-            values, context_length
-        ).squeeze(-1)
+        values = rlhf.query_response_logits_to_response_logits(values, context_length).squeeze(-1)
 
         # step 4. replace any tokens in the response after the first stop token (usually EOS token) with padding
         response_padding_masks, responses = rlhf.truncate_sequence_at_first_stop_token(
@@ -684,9 +640,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         trajectories: List[Trajectory] = []
         with torch.no_grad():
             for batch_start in range(0, self.batch_size, self.forward_batch_size):
-                batch_input_ids = input_ids[
-                    batch_start : batch_start + self.forward_batch_size
-                ]
+                batch_input_ids = input_ids[batch_start : batch_start + self.forward_batch_size]
                 trajectories.append(self.generate_trajectory(batch_input_ids))
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
@@ -742,12 +696,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                         mini_batch_idxs = batch_idxs[i : i + self.ppo_batch_size]
 
                         batch_ppo_stats = [0] * 6
-                        for j in range(
-                            0, self.ppo_batch_size, self.ppo_backward_batch_size
-                        ):
-                            backward_batch_idxs = mini_batch_idxs[
-                                j : j + self.ppo_backward_batch_size
-                            ]
+                        for j in range(0, self.ppo_batch_size, self.ppo_backward_batch_size):
+                            backward_batch_idxs = mini_batch_idxs[j : j + self.ppo_backward_batch_size]
                             batch_trajectory = Trajectory(
                                 *map(
                                     partial(
@@ -767,19 +717,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                             )
 
                             batch_ppo_stats = [
-                                stat + bstat
-                                for stat, bstat in zip(
-                                    batch_ppo_stats, backward_ppo_stats
-                                )
+                                stat + bstat for stat, bstat in zip(batch_ppo_stats, backward_ppo_stats)
                             ]
 
                             del batch_trajectory
 
                         ppo_stats = [
-                            ppo_stat + [batch_ppo_stat]
-                            for ppo_stat, batch_ppo_stat in zip(
-                                ppo_stats, batch_ppo_stats
-                            )
+                            ppo_stat + [batch_ppo_stat] for ppo_stat, batch_ppo_stat in zip(ppo_stats, batch_ppo_stats)
                         ]
                         self._optimizer.step()
                         self._optimizer.zero_grad()
@@ -838,9 +782,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             input_pos=trajectory.position_ids,
             mask=trajectory.masks,
         )
-        pi_logits = rlhf.query_response_logits_to_response_logits(
-            pi_logits, context_length
-        )
+        pi_logits = rlhf.query_response_logits_to_response_logits(pi_logits, context_length)
         pi_logprobs = rlhf.logits_to_logprobs(
             pi_logits, trajectory.query_responses[:, context_length:], self.temperature
         )
@@ -853,9 +795,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             mask=trajectory.masks,
         )
 
-        phi_values = rlhf.query_response_logits_to_response_logits(
-            phi_values, context_length
-        ).squeeze(-1)
+        phi_values = rlhf.query_response_logits_to_response_logits(phi_values, context_length).squeeze(-1)
         phi_values[trajectory.value_padding_masks] = 0.0
 
         # calculate ppo loss
@@ -878,9 +818,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         value_loss /= self._gradient_accumulation_steps
 
         with torch.no_grad():
-            approx_policy_kls = (
-                0.5 * (pi_logprobs - trajectory.logprobs).pow(2)
-            ).mean()
+            approx_policy_kls = (0.5 * (pi_logprobs - trajectory.logprobs).pow(2)).mean()
 
         return loss, policy_loss, value_loss, approx_policy_kls, ratios, clipfrac
 
