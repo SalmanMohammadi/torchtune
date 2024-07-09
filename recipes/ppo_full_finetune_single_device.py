@@ -7,8 +7,8 @@
 import os
 import sys
 from functools import partial
-from itertools import chain
-from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple
+from itertools import chain, cycle
+from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple, Union
 from warnings import warn
 
 import torch
@@ -25,6 +25,9 @@ from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
 
+Checkpointer = Union[
+    utils.FullModelHFCheckpointer, utils.FullModelMetaCheckpointer, utils.FullModelTorchTuneCheckpointer
+]
 Trajectory = NamedTuple(
     "Trajectory",
     [
@@ -52,21 +55,16 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # fp16 precision is explicitly disabled as it is not supported in this
         # recipe (for example, no gradient scaling).
         if self._dtype == torch.float16:
-            raise ValueError(
-                "fp16 precision is not supported in this recipe. Please use fp32 or bf16."
-            )
+            raise ValueError("fp16 precision is not supported in this recipe. Please use fp32 or bf16.")
         # For CUDA devices, check if the HW supports bf16 if bf16 is specified.
         if self._dtype == torch.bfloat16 and self._device != torch.device("cpu"):
             if torch.cuda.is_available():
                 if not torch.cuda.is_bf16_supported():
-                    raise RuntimeError(
-                        "Full bf16 training is not supported on this hardware."
-                    )
+                    raise RuntimeError("Full bf16 training is not supported on this hardware.")
             elif torch.backends.mps.is_available():
                 if packaging.version.parse(torch.__version__).release < (2, 3):
-                    raise RuntimeError(
-                        "Full bf16 training is not supported on this hardware."
-                    )
+                    raise RuntimeError("Full bf16 training is not supported on this hardware.")
+
         # logging attributes
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
@@ -75,91 +73,71 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # These are public properties which are updated by the checkpoint loader
         # when ``resume_from_checkpoint`` is `True` or validated in tests
         self.seed = utils.set_seed(seed=cfg.seed)
-        self.epochs_run = 0
-        self.total_epochs = 0
+        self.total_steps = 0
+        self.steps_run = 0
         self.global_step = 0
 
+        # Training cfg
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
 
-    def save_checkpoint(self, epoch: int) -> None:
+    def save_checkpoint(self, step: int) -> None:
         """
-        Checkpoint the state of the recipe. The constructed checkpoint state dict
-        contains the following information:
-        - Merged weights with key MODEL_KEY
-        - Adapter weights with key ADAPTER_KEY
-        - Relevant recipe state if training is not complete
+        Save state dict to file. The recipe save_checkpoint method is responsible for
+        correctly creating the checkpoint dict and passing to the checkpointer.
+        """
+        policy_ckpt_dict = {utils.MODEL_KEY: self._policy_model.state_dict()}
+        value_ckpt_dict = {utils.MODEL_KEY: self._value_model.state_dict()}
 
-        Checkpointer will save the merged weights, adapter weights and recipe state in
-        different checkpoint files. To correctly resume from training, the adapter weights
-        and recipe state must be provided along with the base model weights.
-        """
-        ckpt_dict = {}
         # if training is in-progress, checkpoint the optimizer state as well
-        if epoch + 1 < self.total_epochs:
-            ckpt_dict.update(
+        if step + 1 < self.total_steps:
+            policy_ckpt_dict.update(
                 {
-                    utils.OPT_KEY: self._optimizer.state_dict(),
                     utils.SEED_KEY: self.seed,
-                    utils.EPOCHS_KEY: self.epochs_run,
-                    utils.TOTAL_EPOCHS_KEY: self.total_epochs,
+                    utils.EPOCHS_KEY: self.steps_run,
+                    utils.TOTAL_EPOCHS_KEY: self.total_steps,
                 }
             )
-
-        # Move to CPU to avoid a copy on GPU
-        state_dict = {k: v.cpu() for k, v in self._policy_model.state_dict().items()}
-
-        # save base model as usual
-        ckpt_dict.update({utils.MODEL_KEY: state_dict})
-
-        # Construct the adapter weights
-        adapter_key_filter = lambda x: x in self.adapter_params
-        adapter_state_dict = {
-            k: v
-            for k, v in self._policy_model.state_dict().items()
-            if adapter_key_filter(k)
-        }
-        adapter_config = {
-            "r": self._lora_rank,
-            "lora_alpha": self._lora_alpha,
-            "target_modules": get_lora_module_names(
-                self._lora_attn_modules,
-                self._apply_lora_to_mlp,
-                self._apply_lora_to_output,
-            ),
-            "peft_type": "LORA",
-        }
-        ckpt_dict.update({utils.ADAPTER_CONFIG: adapter_config})
-        ckpt_dict.update({utils.ADAPTER_KEY: adapter_state_dict})
+            policy_ckpt_dict[utils.OPT_KEY] = self._optimizer.state_dict()
 
         self._policy_checkpointer.save_checkpoint(
-            ckpt_dict,
-            epoch=epoch,
-            intermediate_checkpoint=(epoch + 1 < self.total_epochs),
+            policy_ckpt_dict,
+            epoch=step,
+            intermediate_checkpoint=(step + 1 < self.total_steps),
+        )
+
+        self._value_checkpointer.save_checkpoint(
+            value_ckpt_dict,
+            epoch=step,
+            intermediate_checkpoint=(step + 1 < self.total_steps),
         )
 
     def _update_recipe_state(self, ckpt_dict: Dict[str, Any]) -> None:
         """
         Updates the recipe state from checkpoint.
         """
-        # If seed or total_epoch,
+        # If seed or total_steps don't match,
         # warn the user and overwrite
-        if (
-            self.seed != ckpt_dict[utils.SEED_KEY]
-            or self.total_epochs != ckpt_dict[utils.TOTAL_EPOCHS_KEY]
-        ):
-            warn(
-                message="""Configured value for seed or epochs
-                does not match the value stored in checkpoint."""
+        try:
+            if self.seed != ckpt_dict[utils.SEED_KEY] or self.total_steps != ckpt_dict[utils.TOTAL_EPOCHS_KEY]:
+                warn(
+                    message="""Configured value for seed or total_steps
+                    does not match the value stored in checkpoint."""
+                )
+            self.seed = utils.set_seed(seed=ckpt_dict[utils.SEED_KEY])
+            self.steps_run = ckpt_dict[utils.EPOCHS_KEY]
+            self.total_steps = ckpt_dict[utils.TOTAL_EPOCHS_KEY]
+
+        except KeyError as e:
+            raise KeyError from e(
+                "Checkpoint does not contain the required keys needed for updating recipe state."
+                "Are you sure you passed in the right recipe checkpoint?"
             )
-        self.seed = utils.set_seed(seed=ckpt_dict[utils.SEED_KEY])
-        self.epochs_run = ckpt_dict[utils.EPOCHS_KEY]
-        self.total_epochs = ckpt_dict[utils.TOTAL_EPOCHS_KEY]
 
     def setup(self, cfg: DictConfig) -> None:
         """
-        Setup the recipe state. This includes recipe state (if resume_from_checkpoint is True),
-        model, tokenizer, loss, optimizer, learning rate scheduler, sampler, and dataloader.
+        Sets up the recipe state correctly. This includes setting recipe attributes based
+        on the ``resume_from_checkpoint`` flag.
         """
         self._metric_logger = config.instantiate(cfg.metric_logger)
 
@@ -167,22 +145,25 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._metric_logger.log_config(cfg)
 
         # setup checkpointers
-        self._policy_checkpointer = config.instantiate(
-            cfg.checkpointer,
-            resume_from_checkpoint=self._resume_from_checkpoint,
+        (
+            self._policy_checkpointer,
+            ref_policy_checkpointer,
+            self._value_checkpointer,
+            reward_checkpointer,
+        ) = self._setup_checkpointers(
+            cfg.checkpointer, cfg.ref_policy_checkpointer, cfg.value_checkpointer, cfg.reward_checkpointer
         )
-        self._reward_checkpointer = config.instantiate(
-            cfg.reward_checkpointer,
-            # reward model is never being trained
-            # base model checkpointer handles recipe state
-            resume_from_checkpoint=False,
-        )
-        # load base model checkpoint
+
+        # load policy checkpoints
         policy_model_checkpoint_dict = self._policy_checkpointer.load_checkpoint()
+        ref_policy_state_dict = ref_policy_checkpointer.load_checkpoint()[utils.MODEL_KEY]
 
-        # load reward model checkpoint
-        reward_model_checkpoint_dict = self._reward_checkpointer.load_checkpoint()
+        # load reward and value model checkpoints
+        value_model_checkpoint_dict = self._value_checkpointer.load_checkpoint()[utils.MODEL_KEY]
+        reward_model_state_dict = reward_checkpointer.load_checkpoint()[utils.MODEL_KEY]
 
+        if self._resume_from_checkpoint:
+            self._update_recipe_state(policy_model_checkpoint_dict)
         # update recipe state
         # ``_setup_model`` handles initialization and loading the state dict. This method
         # should be called before ``_setup_optimizer`` since transforming the optimizer
@@ -193,12 +174,14 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             self._reward_model,
             self._ref_policy_model,
         ) = self._setup_model(
-            cfg_model=cfg.policy,
-            cfg_reward_model=cfg.reward_model,
+            cfg_model=cfg.policy_model,
+            cfg_reward_value_model=cfg.reward_and_value_model,
             enable_activation_checkpointing=cfg.enable_activation_checkpointing,
             compile_model=cfg.compile,
-            model_state_dict=policy_model_checkpoint_dict[utils.MODEL_KEY],
-            reward_model_state_dict=reward_model_checkpoint_dict[utils.MODEL_KEY],
+            policy_state_dict=policy_model_checkpoint_dict[utils.MODEL_KEY],
+            ref_policy_state_dict=ref_policy_state_dict,
+            value_model_state_dict=value_model_checkpoint_dict,
+            reward_model_state_dict=reward_model_state_dict,
         )
 
         # setup tokenizer
@@ -210,11 +193,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # checkpoint. Transforming the opt state dict is handled by this method
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
-            opt_state_dict=(
-                policy_model_checkpoint_dict[utils.OPT_KEY]
-                if self._resume_from_checkpoint
-                else None
-            ),
+            opt_state_dict=(policy_model_checkpoint_dict[utils.OPT_KEY] if self._resume_from_checkpoint else None),
         )
 
         # GAE hyperparameters
@@ -242,17 +221,17 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self.ppo_epochs = cfg.ppo_epochs
         self.ppo_batch_size = cfg.ppo_batch_size
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
+
+        # TODO (SalmanMohammadi): validate different batch sizes
         if self.ppo_batch_size % self._gradient_accumulation_steps != 0:
             raise ValueError(
                 f"ppo_batch_size ({self.ppo_batch_size})  must be "
                 f"exactly divisible by gradient_accumulation_steps ({self._gradient_accumulation_steps})."
             )
-        self.ppo_backward_batch_size = (
-            cfg.ppo_batch_size // self._gradient_accumulation_steps
-        )
+        self.ppo_backward_batch_size = cfg.ppo_batch_size // self._gradient_accumulation_steps
 
         # trajectory generation args
-        self.temperature = cfg.temperature + 1e-7  # avoid underflow for 0 temperature
+        self.temperature = cfg.temperature
         self.top_k = cfg.top_k
         self.forward_batch_size = cfg.forward_batch_size
         self.max_generated_tokens = cfg.max_generated_tokens
@@ -280,12 +259,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 stop_token_ids = self._tokenizer.stop_tokens
 
         self.stop_token_ids = torch.tensor(stop_token_ids, device=self._device)
-        self.total_epochs = self.num_steps // self.batch_size
-        # one "step" is an update over a batch of trajectories
-        self._steps_per_epoch = (
-            self.num_steps
-        )  # len(self._dataloader) // self.batch_size
-        self.global_step = self.epochs_run * self._steps_per_epoch
+        self.total_steps = self.num_steps // self.batch_size
+
+        import pdb
+
+        pdb.set_trace()
+        # one "step" is a single gradient update update over a minibatch of trajectories
+        self.global_step = self.steps_run * self.ppo_epochs * (self.batch_size // self.ppo_batch_size)
 
         # setup adaptive KL controller
         self.kl_controller = config.instantiate(cfg.kl_controller)
@@ -293,72 +273,113 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._profiler_enabled = cfg.profiler.enabled
         self._profiler = config.instantiate(cfg.profiler)
 
+    def _setup_checkpointers(
+        self, policy_cfg: DictConfig, ref_policy_cfg: DictConfig, value_cfg: DictConfig, reward_cfg: DictConfig
+    ) -> Tuple[Checkpointer, Checkpointer, Checkpointer, Checkpointer]:
+        """
+        Sets up checkpointers for policy, reference policy, value, and reward models.
+        Only the policy checkpoint handles recipe state for resuming from checkpoints
+        """
+
+        if not self._resume_from_checkpoint:
+            assert policy_cfg.checkpoint_dir == ref_policy_cfg.checkpoint_dir, (
+                "Policy and reference policy should be loaded from the same checkpoint directories"
+                f"at the start of training. Found: {policy_cfg.checkpoint_dir} and"
+                f"{ref_policy_cfg.checkpoint_dir}"
+            )
+            assert policy_cfg.checkpoint_files == ref_policy_cfg.checkpoint_files, (
+                "Policy and reference policy should be loaded from the same checkpoint files"
+                f"at the start of training. Found: {policy_cfg.checkpoint_files} and"
+                f"{ref_policy_cfg.checkpoint_files}"
+            )
+
+        policy_checkpointer = config.instantiate(
+            policy_cfg,
+            resume_from_checkpoint=self._resume_from_checkpoint,
+        )
+
+        ref_policy_checkpointer = config.instantiate(
+            ref_policy_cfg,
+            resume_from_checkpoint=False,
+        )
+
+        value_checkpointer = config.instantiate(
+            value_cfg,
+            resume_from_checkpoint=False,
+        )
+
+        reward_checkpointer = config.instantiate(
+            reward_cfg,
+            resume_from_checkpoint=False,
+        )
+
+        return policy_checkpointer, ref_policy_checkpointer, value_checkpointer, reward_checkpointer
+
     def _setup_model(
         self,
         cfg_model: DictConfig,
-        cfg_reward_model: DictConfig,
+        cfg_reward_value_model: DictConfig,
         enable_activation_checkpointing: bool,
         compile_model: bool,
-        model_state_dict: Dict[str, Any],
+        policy_state_dict: Dict[str, Any],
+        ref_policy_state_dict: Dict[str, Any],
+        value_model_state_dict: Dict[str, Any],
         reward_model_state_dict: Dict[str, Any],
     ) -> Tuple[nn.Module, nn.Module, nn.Module]:
 
         with utils.set_default_dtype(self._dtype), self._device:
             policy_model = config.instantiate(cfg_model)
             ref_policy_model = config.instantiate(cfg_model)
-            reward_model = config.instantiate(cfg_reward_model)
-            value_model = config.instantiate(cfg_reward_model)
+            reward_model = config.instantiate(cfg_reward_value_model)
+            value_model = config.instantiate(cfg_reward_value_model)
 
         if enable_activation_checkpointing:
-            utils.set_activation_checkpointing(
-                policy_model, auto_wrap_policy={modules.TransformerDecoderLayer}
-            )
-            utils.set_activation_checkpointing(
-                value_model, auto_wrap_policy={modules.TransformerDecoderLayer}
-            )
+            utils.set_activation_checkpointing(policy_model, auto_wrap_policy={modules.TransformerDecoderLayer})
+            utils.set_activation_checkpointing(value_model, auto_wrap_policy={modules.TransformerDecoderLayer})
 
-        policy_model.load_state_dict(model_state_dict)
-        ref_policy_model.load_state_dict(model_state_dict)
+        print("_____________________________")
 
-        reward_missing, reward_unexpected = reward_model.load_state_dict(
-            reward_model_state_dict, strict=False
-        )
-        value_missing, value_unexpected = value_model.load_state_dict(
-            reward_model_state_dict, strict=False
-        )
+        print(cfg_model)
+        print("_____________________________")
 
+        print("_____________________________")
+
+        print("_____________________________")
+
+        policy_model.load_state_dict(policy_state_dict)
+        ref_policy_model.load_state_dict(ref_policy_state_dict)
+
+        reward_missing, reward_unexpected = reward_model.load_state_dict(reward_model_state_dict, strict=False)
+        value_missing, value_unexpected = value_model.load_state_dict(value_model_state_dict, strict=False)
+
+        # some extra validation for HF classifier checkpoints with a `score.bias` present
         assert (
             reward_missing == value_missing == []
         ), f"Missing keys in reward ({reward_missing}) and value model ({value_missing}) state dicts."
 
         if reward_unexpected or value_unexpected:
+            # the only unexpected keys should be when pre-trained HF models were saved with
+            # bias=True in final classification layers.
             assert (
                 reward_unexpected == value_unexpected == ["output.bias"]
             ), f"Unexpected keys in reward ({reward_unexpected}) and value model ({value_unexpected}) state dicts."
 
         # Validate model was loaded in with the expected dtype.
-        utils.validate_expected_param_dtype(
-            value_model.named_parameters(), dtype=self._dtype
-        )
+        utils.validate_expected_param_dtype(value_model.named_parameters(), dtype=self._dtype)
         log.info(f"Base model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(
-            reward_model.named_parameters(), dtype=self._dtype
-        )
+        utils.validate_expected_param_dtype(reward_model.named_parameters(), dtype=self._dtype)
         log.info(f"Reward model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(
-            value_model.named_parameters(), dtype=self._dtype
-        )
+        utils.validate_expected_param_dtype(value_model.named_parameters(), dtype=self._dtype)
         log.info(f"Value model is initialized with precision {self._dtype}.")
 
-        utils.validate_expected_param_dtype(
-            ref_policy_model.named_parameters(), dtype=self._dtype
-        )
+        utils.validate_expected_param_dtype(ref_policy_model.named_parameters(), dtype=self._dtype)
         log.info(f"Ref model is initialized with precision {self._dtype}.")
 
-        # disabling dropout if found
         for model in [policy_model, value_model, ref_policy_model, reward_model]:
+            # disabling dropout if found - non-determinism leads to issues in e.g. comparing logprobs
+            # between ref policy and current policy
             for module in model.modules():
                 if isinstance(module, torch.nn.Dropout):
                     module.p = 0
@@ -400,7 +421,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         if opt_state_dict:
             optimizer.load_state_dict(opt_state_dict)
 
-        log.info("Optimizer and loss are initialized.")
+        log.info("Optimizer is initialized.")
         return optimizer
 
     def _setup_lr_scheduler(
@@ -427,8 +448,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         if isinstance(cfg_dataset, ListConfig):
             datasets = [
-                config.instantiate(single_cfg_dataset, tokenizer=self._tokenizer)
-                for single_cfg_dataset in cfg_dataset
+                config.instantiate(single_cfg_dataset, tokenizer=self._tokenizer) for single_cfg_dataset in cfg_dataset
             ]
             ds = ConcatDataset(datasets=datasets)
         else:
@@ -463,22 +483,30 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
     def generate_trajectory(self, input_ids: torch.Tensor) -> Trajectory:
         """
-        Generates a trajectory given the current policy and value model and batch of inputs.
+        Generates a trajectory given the current policy and value models, the reference policy model, the reward model,
+        and batch of inputs.
 
         Args:
             input_ids (torch.Tensor): tensor of input token IDs with shape [b, seq_length]
 
         Returns:
-            Trajectory (NamedTuple): A collection of tensors corresponding to the current trajectory:
-            - query_responses (torch.Tensor): generated responses with shape [b, max_generated_tokens]
+            Trajectory (NamedTuple): A collection of tensors comprising the trajectory for the current minibatch:
+            - query_responses (torch.Tensor): input ids-generated responses pairs
+                shape [b, context_length + max_generated_tokens]
             - logprobs (torch.Tensor): log probabilities of the generated responses with shape [b, max_generated_tokens]
-            - ref_logprobs (torch.Tensor): log probabilities of the generated responses using the reference policy with shape [b, max_generated_tokens]
+            - ref_logprobs (torch.Tensor): log probabilities of the generated responses using the reference policy
+                shape [b, max_generated_tokens]
             - values (torch.Tensor): value estimates of the generated responses with shape [b, max_generated_tokens]
-            - masks (Any[torch.Tensor]): attention masks with shape [b, max_generated_tokens, max_generated_tokens]
-            - position_ids (Any[torch.Tensor]): position IDs with shape [b, max_generated_tokens]
-            - response_padding_masks (torch.Tensor): padding masks for the post-processed, truncated generated responses with shape [b, max_generated_tokens]
-            - value_padding_masks (torch.Tensor): padding masks for the values with shape [b, max_generated_tokens]
-            - value_seq_idxs (torch.Tensor): indexes of the last valid (non-padding) token in the response with shape [b]
+            - masks (torch.Tensor): attention masks for input ids-generated responses pairs
+                shape [b, context_length + max_generated_tokens, context_length + max_generated_tokens]
+            - position_ids (torch.Tensor): position IDs for input ids-generated responses pairs
+                shape [b, context_length + max_generated_tokens]
+            - response_padding_masks (torch.Tensor): padding masks for the truncated and padded generated responses
+                shape [b, max_generated_tokens]
+            - value_padding_masks (torch.Tensor): padding masks for the values with
+                shape [b, max_generated_tokens]
+            - value_seq_idxs (torch.Tensor): indexes of the token
+                after the last valid (non-padding) token in the responses with shape [b]
             - scores (torch.Tensor): scores from the reward model with shape [b]
 
         """
@@ -498,39 +526,30 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # step 1.1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
         masks = rlhf.get_causal_mask(~(query_response_padding_masks))
-        position_ids = (~query_response_padding_masks).cumsum(-1) - (
-            ~query_response_padding_masks
-        ).long()
+        position_ids = (~query_response_padding_masks).cumsum(-1) - (~query_response_padding_masks).long()
         position_ids = position_ids.type(torch.int)
 
         del query_response_padding_masks
 
         # step 2. estimate logprobs of the generated responses using the current policy
-        logits = logits[
-            :, context_length - 1 :
-        ]  # [b, max_generated_tokens, vocab_size]
+        logits = logits[:, context_length - 1 :]
         logprobs = rlhf.logits_to_logprobs(logits, responses, self.temperature)
 
         del logits
 
         # step 2.1 estimate logprobs of the generated responses using the reference policy
-        ref_logits = self._ref_policy_model(
-            query_responses, input_pos=position_ids, mask=masks
-        )
-        ref_logits = rlhf.query_response_logits_to_response_logits(
-            ref_logits, context_length
-        )
+        ref_logits = self._ref_policy_model(query_responses, input_pos=position_ids, mask=masks)
+        ref_logits = rlhf.query_response_logits_to_response_logits(ref_logits, context_length)
         ref_logprobs = rlhf.logits_to_logprobs(ref_logits, responses, self.temperature)
 
         del ref_logits
+        if self.global_step == 1:
+            import pdb
 
+            pdb.set_trace()
         # step 3. estimate values from the generated responses using the value function
         values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
-        values = rlhf.query_response_logits_to_response_logits(
-            values, context_length
-        ).squeeze(
-            -1
-        )  # [b, max_generated_tokens]
+        values = rlhf.query_response_logits_to_response_logits(values, context_length).squeeze(-1)
 
         # step 4. replace any tokens in the response after the first stop token (usually EOS token) with padding
         response_padding_masks, responses = rlhf.truncate_sequence_at_first_stop_token(
@@ -592,22 +611,30 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
     def generate_trajectory_batched(self, input_ids: torch.Tensor) -> Trajectory:
+        """
+        Generates a `self.batch_size` batch of trajectories using `self.forward_batch_size` batch sizes.
+        See `generate_trajectory` for more details.
+
+        Args:
+            input_ids (torch.Tensor): tensor of input token IDs with shape [b, seq_length]
+
+        Returns:
+            Trajectory (NamedTuple): A collection of tensors comprising the current trajectory.
+        """
         trajectories: List[Trajectory] = []
         with torch.no_grad():
             for batch_start in range(0, self.batch_size, self.forward_batch_size):
-                batch_input_ids = input_ids[
-                    batch_start : batch_start + self.forward_batch_size
-                ]
+                batch_input_ids = input_ids[batch_start : batch_start + self.forward_batch_size]
                 trajectories.append(self.generate_trajectory(batch_input_ids))
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
     def train(self) -> None:
         """
         The core training loop."""
-        pbar = tqdm(total=self.total_epochs)
-        for curr_epoch in range(self.epochs_run, self.total_epochs):
-            self._sampler.set_epoch(curr_epoch)
+        for curr_step in range(self.steps_run, self.total_steps):
 
+            self._sampler.set_epoch(curr_step)
+            pbar = tqdm(total=self.total_steps)
             with self._profiler:
 
                 if self._profiler_enabled:
@@ -653,12 +680,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                         mini_batch_idxs = batch_idxs[i : i + self.ppo_batch_size]
 
                         batch_ppo_stats = [0] * 6
-                        for j in range(
-                            0, self.ppo_batch_size, self.ppo_backward_batch_size
-                        ):
-                            backward_batch_idxs = mini_batch_idxs[
-                                j : j + self.ppo_backward_batch_size
-                            ]
+                        for j in range(0, self.ppo_batch_size, self.ppo_backward_batch_size):
+                            backward_batch_idxs = mini_batch_idxs[j : j + self.ppo_backward_batch_size]
                             batch_trajectory = Trajectory(
                                 *map(
                                     partial(
@@ -670,7 +693,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 )
                             )
 
-                            backward_ppo_stats = self.ppo_step(
+                            backward_ppo_stats = self._ppo_step(
                                 batch_trajectory,
                                 advantages[backward_batch_idxs],
                                 returns[backward_batch_idxs],
@@ -678,19 +701,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                             )
 
                             batch_ppo_stats = [
-                                stat + bstat
-                                for stat, bstat in zip(
-                                    batch_ppo_stats, backward_ppo_stats
-                                )
+                                stat + bstat for stat, bstat in zip(batch_ppo_stats, backward_ppo_stats)
                             ]
 
                             del batch_trajectory
 
                         ppo_stats = [
-                            ppo_stat + [batch_ppo_stat]
-                            for ppo_stat, batch_ppo_stat in zip(
-                                ppo_stats, batch_ppo_stats
-                            )
+                            ppo_stat + [batch_ppo_stat] for ppo_stat, batch_ppo_stat in zip(ppo_stats, batch_ppo_stats)
                         ]
                         self._optimizer.step()
                         self._optimizer.zero_grad()
@@ -698,6 +715,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                 # step 5. profit
 
+            self.steps_run += 1
             ppo_stats = map(torch.tensor, ppo_stats)
             self.log_metrics(
                 trajectory,
@@ -705,11 +723,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 kl_rewards,
                 *ppo_stats,
             )
-            self.kl_controller.update(kl.sum(1).mean().item(), self.global_step)
-            self.cleanup_step(trajectory, advantages, returns, kl, kl_rewards)
+            self.kl_controller.update(kl.sum(1).mean().item(), self.steps_run)
+            self.cleanup_after_step(trajectory, advantages, returns, kl, kl_rewards)
+            self.save_checkpoint(curr_step)
             pbar.update(1)
 
-    def ppo_step(
+    def _ppo_step(
         self,
         trajectory: Trajectory,
         advantages: torch.Tensor,
@@ -747,9 +766,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             input_pos=trajectory.position_ids,
             mask=trajectory.masks,
         )
-        pi_logits = rlhf.query_response_logits_to_response_logits(
-            pi_logits, context_length
-        )
+        pi_logits = rlhf.query_response_logits_to_response_logits(pi_logits, context_length)
         pi_logprobs = rlhf.logits_to_logprobs(
             pi_logits, trajectory.query_responses[:, context_length:], self.temperature
         )
@@ -762,9 +779,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             mask=trajectory.masks,
         )
 
-        phi_values = rlhf.query_response_logits_to_response_logits(
-            phi_values, context_length
-        ).squeeze(-1)
+        phi_values = rlhf.query_response_logits_to_response_logits(phi_values, context_length).squeeze(-1)
         phi_values[trajectory.value_padding_masks] = 0.0
 
         # calculate ppo loss
@@ -787,9 +802,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         value_loss /= self._gradient_accumulation_steps
 
         with torch.no_grad():
-            approx_policy_kls = (
-                0.5 * (pi_logprobs - trajectory.logprobs).pow(2)
-            ).mean()
+            approx_policy_kls = (0.5 * (pi_logprobs - trajectory.logprobs).pow(2)).mean()
 
         return loss, policy_loss, value_loss, approx_policy_kls, ratios, clipfrac
 
@@ -823,7 +836,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         }
         self._metric_logger.log_dict(log_dict, step=self.global_step)
 
-    def cleanup_step(
+    def cleanup_after_step(
         self,
         trajectory: Trajectory,
         advantages: torch.Tensor,
@@ -831,6 +844,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         kl: torch.Tensor,
         kl_rewards: torch.Tensor,
     ) -> None:
+        """
+        Cleanup tensors after each PPO step to free up memory.
+        """
         # there shouldn't be any floating references to the individual tensors at the this point, so gc can do its thing
         for tensor in trajectory:
             del tensor

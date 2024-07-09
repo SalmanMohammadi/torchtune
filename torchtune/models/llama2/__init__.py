@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from ._component_builders import llama2, lora_llama2
+from ._component_builders import llama2, lora_llama2, llama2_classifier
 
 from ._model_builders import (  # noqa
     llama2_13b,
@@ -25,6 +25,7 @@ __all__ = [
     "llama2_7b",
     "llama2_tokenizer",
     "lora_llama2",
+    "llama2_classifier",
     "lora_llama2_7b",
     "qlora_llama2_7b",
     "qlora_llama2_13b",

@@ -142,7 +142,7 @@ class TestFullFinetuneSingleDeviceRecipe:
         monkeypatch.setattr(sys, "argv", cmd_1)
         with pytest.raises(SystemExit, match=""):
             runpy.run_path(TUNE_PATH, run_name="__main__")
-
+        
         # Resume training
         cmd_2 = f"""
         tune run full_finetune_single_device \

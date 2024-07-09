@@ -191,7 +191,9 @@ _ALL_RECIPES = [
     Recipe(
         name="ppo_full_finetune_single_device",
         file_path="ppo_full_finetune_single_device.py",
-        configs=[],
+        configs=[
+            Config("llama2/1B_full_ppo_single_device", "llama2/1B_full_ppo_single_device.yaml"),
+        ],
         supports_distributed=False,
     ),
     Recipe(

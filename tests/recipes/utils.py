@@ -61,9 +61,36 @@ def dummy_alpaca_dataset_config():
     return out
 
 
+def dummy_text_completion_dataset_config():
+    data_files = os.path.join(get_assets_path(), "alpaca_tiny.json")
+    out = [
+        "dataset._component_=torchtune.datasets.text_completion_dataset",
+        "dataset.source='json'",
+        f"dataset.data_files={data_files}",
+        "dataset.column='output'",
+        "dataset.split='train'",
+        "dataset.max_seq_len=null",
+    ]
+    return out
+
+
 def llama2_test_config() -> List[str]:
     return [
         "model._component_=torchtune.models.llama2.llama2",
+        "model.vocab_size=32_000",
+        "model.num_layers=4",
+        "model.num_heads=16",
+        "model.embed_dim=256",
+        "model.max_seq_len=2048",
+        "model.norm_eps=1e-5",
+        "model.num_kv_heads=8",
+    ]
+
+
+def llama2_classifier_test_config() -> List[str]:
+    return [
+        "model._component_=torchtune.models.llama2.llama2_classifier",
+        "model.num_classes=1",
         "model.vocab_size=32_000",
         "model.num_layers=4",
         "model.num_heads=16",

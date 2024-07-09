@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from functools import partial
-from typing import List, Optional
+from typing import Optional
 
 from torch import nn
 from torchtune.models.llama2._component_builders import llama2_mlp
@@ -14,13 +13,11 @@ from torchtune.models.llama2._model_utils import scale_hidden_dim_for_mlp
 
 from torchtune.modules import (
     CausalSelfAttention,
-    FeedForward,
     RMSNorm,
     RotaryPositionalEmbeddings,
     TransformerDecoder,
     TransformerDecoderLayer,
 )
-from torchtune.modules.common_utils import reparametrize_as_dtype_state_dict_post_hook
 
 
 def llama2(
