@@ -62,12 +62,12 @@ def dummy_alpaca_dataset_config():
 
 
 def dummy_text_completion_dataset_config():
-    data_files = os.path.join(get_assets_path(), "alpaca_tiny.json")
+    data_files = os.path.join(get_assets_path(), "text_completion_nano.json")
     out = [
         "dataset._component_=torchtune.datasets.text_completion_dataset",
         "dataset.source='json'",
         f"dataset.data_files={data_files}",
-        "dataset.column='output'",
+        "dataset.column='prompt'",
         "dataset.split='train'",
         "dataset.max_seq_len=null",
     ]

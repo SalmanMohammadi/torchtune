@@ -142,17 +142,7 @@ stop_token_ids: [
 ]
   # 29889
 
-# KL controller arguments -
-# kl_controller:
-#   _component_: torchtune.modules.rlhf.AdaptiveKLController
-#   init_kl_coef: 0.15
-#   kl_target: 6
-#   kl_horizon: 10000
-
-kl_controller:
-  _component_: torchtune.modules.rlhf.FixedKLController
-  kl_coef: 0.01
-
+kl_coeff: 0.01
 # optimizer:
 #   _component_: bitsandbytes.optim.PagedAdamW
 #   lr: 3e-4

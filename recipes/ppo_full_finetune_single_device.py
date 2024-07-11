@@ -10,6 +10,7 @@ from functools import partial
 from itertools import chain
 from typing import Any, Dict, Iterator, List, NamedTuple, Optional, Tuple, Union
 from warnings import warn
+import math
 
 import torch
 from omegaconf import DictConfig, ListConfig
@@ -75,43 +76,51 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # These are public properties which are updated by the checkpoint loader
         # when ``resume_from_checkpoint`` is `True` or validated in tests
         self.seed = utils.set_seed(seed=cfg.seed)
-        self.total_steps = 0
-        self.steps_run = 0
+        self._total_steps = 0
+        self._steps_run = 0
+        self._total_epochs = 0
+        self._epochs_run = 0
         self.global_step = 0
 
         # Training cfg
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
 
-    def save_checkpoint(self, step: int) -> None:
+    def save_checkpoint(self, epoch: int, is_intermediate_checkpoint: bool = False) -> None:
         """
         Save state dict to file. The recipe save_checkpoint method is responsible for
         correctly creating the checkpoint dict and passing to the checkpointer.
         """
+        if epoch == 0:
+            import pdb
+
+            pdb.set_trace()
         policy_ckpt_dict = {utils.MODEL_KEY: self._policy_model.state_dict()}
         value_ckpt_dict = {utils.MODEL_KEY: self._value_model.state_dict()}
 
         # if training is in-progress, checkpoint the optimizer state as well
-        if step + 1 < self.total_steps:
+        if is_intermediate_checkpoint:
             policy_ckpt_dict.update(
                 {
                     utils.SEED_KEY: self.seed,
-                    utils.EPOCHS_KEY: self.steps_run,
-                    utils.TOTAL_EPOCHS_KEY: self.total_steps,
+                    utils.EPOCHS_KEY: self._epochs_run,
+                    utils.TOTAL_EPOCHS_KEY: self._total_epochs,
+                    utils.MAX_STEPS_KEY: self._total_steps,
+                    utils.STEPS_KEY: self._steps_run,
                 }
             )
             policy_ckpt_dict[utils.OPT_KEY] = self._optimizer.state_dict()
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
-            epoch=step,
-            intermediate_checkpoint=(step + 1 < self.total_steps),
+            epoch=epoch,
+            intermediate_checkpoint=is_intermediate_checkpoint,
         )
 
         self._value_checkpointer.save_checkpoint(
             value_ckpt_dict,
-            epoch=step,
-            intermediate_checkpoint=(step + 1 < self.total_steps),
+            epoch=epoch,
+            intermediate_checkpoint=False,
         )
 
     def _update_recipe_state(self, ckpt_dict: Dict[str, Any]) -> None:
@@ -120,15 +129,20 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         # If seed or total_steps don't match,
         # warn the user and overwrite
+        import pdb
+
+        pdb.set_trace()
         try:
-            if self.seed != ckpt_dict[utils.SEED_KEY] or self.total_steps != ckpt_dict[utils.TOTAL_EPOCHS_KEY]:
+            if self.seed != ckpt_dict[utils.SEED_KEY] or self._total_steps != ckpt_dict[utils.MAX_STEPS_KEY]:
                 warn(
                     message="""Configured value for seed or total_steps
                     does not match the value stored in checkpoint."""
                 )
             self.seed = utils.set_seed(seed=ckpt_dict[utils.SEED_KEY])
-            self.steps_run = ckpt_dict[utils.EPOCHS_KEY]
-            self.total_steps = ckpt_dict[utils.TOTAL_EPOCHS_KEY]
+            self._steps_run = ckpt_dict[utils.STEPS_KEY]
+            self._total_steps = ckpt_dict[utils.MAX_STEPS_KEY]
+            self._total_epochs = ckpt_dict[utils.TOTAL_EPOCHS_KEY]
+            self._epochs_run = ckpt_dict[utils.EPOCHS_KEY]
 
         except KeyError as e:
             raise KeyError from e(
@@ -193,7 +207,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._tokenizer = config.instantiate(cfg.tokenizer)
         log.info("Tokenizer is initialized from file.")
 
-        # setup opt
         # _setup_optimizer should take in ckpt_dict only if training is resumed from
         # checkpoint. Transforming the opt state dict is handled by this method
         self._optimizer = self._setup_optimizer(
@@ -201,10 +214,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             opt_state_dict=(policy_model_checkpoint_dict[utils.OPT_KEY] if self._resume_from_checkpoint else None),
         )
 
-        # GAE hyperparameters
-        self.gamma = cfg.loss.gamma
-        self.lmbda = cfg.loss.lmbda
-        self.whiten_rewards = cfg.whiten_rewards
         self._loss_fn = config.instantiate(cfg.loss)
         log.info("Loss is initialized.")
 
@@ -217,36 +226,38 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
         import pdb
 
-        pdb.set_trace()
-        # setup training params:
-        # num_steps - global number of optimisation steps (batches)
-        # batch_size - number of samples in a batch
-        # ppo_epochs - number of epochs to optimise the policy over a batch of episodes
-        # ppo_batch_size - number of minibatches (sampled from a single batch) to optimise the policy over
-        self.num_steps = cfg.num_steps
-        self.batch_size = cfg.batch_size
-        self.ppo_epochs = cfg.ppo_epochs
-        self.ppo_batch_size = cfg.ppo_batch_size
-        self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
+        # pdb.set_trace()
 
-        # TODO (SalmanMohammadi): validate different batch sizes
-        if self.ppo_batch_size % self._gradient_accumulation_steps != 0:
-            raise ValueError(
-                f"ppo_batch_size ({self.ppo_batch_size})  must be "
-                f"exactly divisible by gradient_accumulation_steps ({self._gradient_accumulation_steps})."
-            )
-        self.ppo_backward_batch_size = cfg.ppo_batch_size // self._gradient_accumulation_steps
+        self._setup_training_parameters(cfg)
+        self._setup_training_hyperparameters(cfg)
+
+        import pdb
+
+        # pdb.set_trace()
+        # one "step" is a single gradient update update over a minibatch of trajectories
+        self.global_step = self._steps_run * self._ppo_epochs * (self.batch_size // self._ppo_batch_size)
+
+    def _setup_training_hyperparameters(self, cfg) -> None:
+        """
+        Sets up the training hyperparameters for the recipe. This includes the GAE hyperparameters,
+        generation hyperparameters, reward masking hyperparameters, and stop token ids.
+        """
+
+        self._kl_coeff = cfg.kl_coeff
+        # GAE hyperparameters
+        self._gamma = cfg.loss.gamma
+        self._lmbda = cfg.loss.lmbda
+        self._whiten_rewards = cfg.whiten_rewards
 
         # trajectory generation args
-        self.temperature = cfg.temperature
-        self.top_k = cfg.top_k
-        self.forward_batch_size = cfg.forward_batch_size
-        self.max_generated_tokens = cfg.max_generated_tokens
+        self._temperature = cfg.temperature
+        self._top_k = cfg.top_k
+        self._max_generated_tokens = cfg.max_generated_tokens
 
         # reward masking args
-        self.min_response_length = cfg.min_response_length
-        self.penalise_no_eos = cfg.penalise_no_eos
-        self.reward_penalty = cfg.reward_penalty
+        self._min_response_length = cfg.min_response_length
+        self._penalise_no_eos = cfg.penalise_no_eos
+        self._reward_penalty = cfg.reward_penalty
 
         # lots of hand holding for stop tokens
         if cfg.get("stop_token_ids", False):
@@ -264,24 +275,57 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 stop_token_ids = []
             else:
                 stop_token_ids = self._tokenizer.stop_tokens
+        self._stop_token_ids = torch.tensor(stop_token_ids, device=self._device)
 
-        self.stop_token_ids = torch.tensor(stop_token_ids, device=self._device)
-        self.total_steps = self.num_steps // self.batch_size
+    def _setup_training_parameters(self, cfg: DictConfig) -> None:
+        """
+        Validates and sets up parameters for used during training and for tracking training state, batch sizes for
+        model forward passes during trajectory generation, PPO minibatches, and
+        PPO microbatches for gradient accumulation.
 
-        import pdb
+        Raises
+            - ValueError if:
+                - batch_size is not divisible by forward_batch_size
+                - batch_size is not divisible by ppo_batch_size
+                - ppo_batch_size is not divisible by gradient_accumulation_steps
+                - num_steps is less than batch_size
+        """
+        self.batch_size = cfg.batch_size
+        self._forward_batch_size = cfg.forward_batch_size
+        self._ppo_epochs = cfg.ppo_epochs
+        self._ppo_batch_size = cfg.ppo_batch_size
+        self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
+        self._ppo_backward_batch_size = cfg.ppo_batch_size // self._gradient_accumulation_steps
 
-        pdb.set_trace()
-        # one "step" is a single gradient update update over a minibatch of trajectories
-        self.global_step = self.steps_run * self.ppo_epochs * (self.batch_size // self.ppo_batch_size)
+        if self.batch_size % self._forward_batch_size != 0:
+            raise ValueError(
+                f"batch_size ({self.batch_size}) must be exactly divisible by forward_batch_size ({self._forward_batch_size})."
+            )
+        if self.batch_size % self._ppo_batch_size != 0:
+            raise ValueError(
+                f"batch_size ({self.batch_size}) must be exactly divisible by ppo_batch_size ({self._ppo_batch_size})."
+            )
+        if self._ppo_batch_size % self._gradient_accumulation_steps != 0:
+            raise ValueError(
+                f"ppo_batch_size ({self._ppo_batch_size}) must be exactly divisible by gradient_accumulation_steps ({self._gradient_accumulation_steps})."
+            )
 
-        # setup adaptive KL controller
-        self.kl_controller = config.instantiate(cfg.kl_controller)
-
-        self._profiler_enabled = cfg.profiler.enabled
-        self._profiler = config.instantiate(cfg.profiler)
-
-    def _setup_batch_sizes(self, cfg: DictConfig):
-        pass
+        self._total_steps = cfg.num_steps // self.batch_size
+        batches_per_epoch = len(self._dataloader)
+        self._total_epochs = math.ceil(self._total_steps / batches_per_epoch)
+        if self._total_steps == 0:
+            raise ValueError(f"num_steps {cfg.num_steps} must be greater than the batch size {self.batch_size}.")
+        if self._total_steps < len(self._dataloader):
+            warn(
+                f"There are fewer total steps ({self._total_steps} (num_steps//batch_size - {cfg.num_steps}//{self.batch_size})"
+                f"than there are batches ({len(self._dataloader)}) in the dataset."
+                f"Training will stop after ({self._total_steps}) steps without saving intermediate checkpoints"
+            )
+        if (self._total_steps > batches_per_epoch) and (self._total_steps % batches_per_epoch != 0):
+            warn(
+                f"num_steps ({cfg.num_steps}) is not exactly divisible by the number of batches in the dataset ({batches_per_epoch})."
+                f"Intermediate checkpoints will only be saved every {batches_per_epoch} steps."
+            )
 
     def _setup_checkpointers(
         self,
@@ -356,15 +400,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             utils.set_activation_checkpointing(policy_model, auto_wrap_policy={modules.TransformerDecoderLayer})
             utils.set_activation_checkpointing(value_model, auto_wrap_policy={modules.TransformerDecoderLayer})
 
-        print("_____________________________")
-
-        print(cfg_model)
-        print("_____________________________")
-
-        print("_____________________________")
-
-        print("_____________________________")
-
         policy_model.load_state_dict(policy_state_dict)
         ref_policy_model.load_state_dict(ref_policy_state_dict)
 
@@ -396,7 +431,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         utils.validate_expected_param_dtype(ref_policy_model.named_parameters(), dtype=self._dtype)
         log.info(f"Ref model is initialized with precision {self._dtype}.")
 
-        for model in [policy_model, value_model, ref_policy_model, reward_model]:
+        for model in [policy_model, value_model]:
             # disabling dropout if found - non-determinism leads to issues in e.g. comparing logprobs
             # between ref policy and current policy
             for module in model.modules():
@@ -491,14 +526,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             drop_last=True,
         )
 
-        def repeat_generator(dataloader: DataLoader) -> Iterator[torch.Tensor]:
-            # infinite generator for when num_steps > len(dataloader) // self.batch_size
-            while True:
-                yield from dataloader
-
-        log.info("Dataset and Sampler are initialized.")
-
-        return sampler, iter(repeat_generator(dataloader))
+        return sampler, dataloader
 
     def generate_trajectory(self, input_ids: torch.Tensor) -> Trajectory:
         """
@@ -535,9 +563,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         query_responses, logits = rlhf.generate_with_logits(
             model=self._policy_model,
             prompt=input_ids,
-            max_generated_tokens=self.max_generated_tokens,
-            temperature=self.temperature,
-            top_k=self.top_k,
+            max_generated_tokens=self._max_generated_tokens,
+            temperature=self._temperature,
+            top_k=self._top_k,
             pad_id=self._tokenizer.pad_id,
         )
         responses = query_responses[:, context_length:].clone()
@@ -552,27 +580,27 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # step 2. estimate logprobs of the generated responses using the current policy
         logits = logits[:, context_length - 1 :]
-        logprobs = rlhf.logits_to_logprobs(logits, responses, self.temperature)
+        logprobs = rlhf.logits_to_logprobs(logits, responses, self._temperature)
 
         del logits
 
         # step 2.1 estimate logprobs of the generated responses using the reference policy
         ref_logits = self._ref_policy_model(query_responses, input_pos=position_ids, mask=masks)
         ref_logits = rlhf.query_response_logits_to_response_logits(ref_logits, context_length)
-        ref_logprobs = rlhf.logits_to_logprobs(ref_logits, responses, self.temperature)
+        ref_logprobs = rlhf.logits_to_logprobs(ref_logits, responses, self._temperature)
 
         del ref_logits
         if self.global_step == 1:
             import pdb
 
-            pdb.set_trace()
+            # pdb.set_trace()
         # step 3. estimate values from the generated responses using the value function
         values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
         values = rlhf.query_response_logits_to_response_logits(values, context_length).squeeze(-1)
 
         # step 4. replace any tokens in the response after the first stop token (usually EOS token) with padding
         response_padding_masks, responses = rlhf.truncate_sequence_at_first_stop_token(
-            responses, self.stop_token_ids, self._tokenizer.pad_id
+            responses, self._stop_token_ids, self._tokenizer.pad_id
         )
 
         # step 5. run the reward model on the query truncated-response pairs
@@ -589,22 +617,26 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         scores = scores[torch.arange(batch_size), seq_lens + context_length].squeeze(-1)
 
         # step 5.2 if configured, apply any penalties for sequences without EOS tokens or shorter than a certain length
-        if self.penalise_no_eos or self.min_response_length:
+        if self._penalise_no_eos or self._min_response_length:
             reward_penalty_mask = rlhf.get_reward_penalty_mask(
                 response_padding_masks,
                 seq_lens,
-                self.penalise_no_eos,
-                self.min_response_length,
+                self._penalise_no_eos,
+                self._min_response_length,
             )
-            scores[reward_penalty_mask] = self.reward_penalty
+            scores[reward_penalty_mask] = self._reward_penalty
 
+        if self._steps_run == 2:
+            import pdb
+
+            pdb.set_trace()
         # step 6. mask out all the invalid values in the trajectory due to padding tokens
         logprobs[response_padding_masks] = 1.0
         ref_logprobs[response_padding_masks] = 1.0
 
         # step 6.1 values are masked out *after* the last valid token in the response
         value_seq_idxs = torch.where(
-            (seq_lens > 0) & (seq_lens < self.max_generated_tokens - 1),
+            (seq_lens > 0) & (seq_lens < self._max_generated_tokens - 1),
             seq_lens + 1,
             seq_lens,
         )
@@ -631,7 +663,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
     def generate_trajectory_batched(self, input_ids: torch.Tensor) -> Trajectory:
         """
-        Generates a `self.batch_size` batch of trajectories using `self.forward_batch_size` batch sizes.
+        Generates a `self.batch_size` batch of trajectories using `self._forward_batch_size` batch sizes.
         See `generate_trajectory` for more details.
 
         Args:
@@ -642,31 +674,31 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         trajectories: List[Trajectory] = []
         with torch.no_grad():
-            for batch_start in range(0, self.batch_size, self.forward_batch_size):
-                batch_input_ids = input_ids[batch_start : batch_start + self.forward_batch_size]
+            for batch_start in range(0, self.batch_size, self._forward_batch_size):
+                batch_input_ids = input_ids[batch_start : batch_start + self._forward_batch_size]
                 trajectories.append(self.generate_trajectory(batch_input_ids))
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
     def train(self) -> None:
         """
         The core training loop."""
-        # this will be minimum 1, max whatever
-        for curr_epoch in range(self.epochs_run, self.total_epochs):
-            
+
+        training_completed = False
+        # for curr_step in range(self._steps_run, self._total_steps):
+
+        #     self._sampler.set_epoch(curr_step)
+        for curr_epoch in range(self._epochs_run, self._total_epochs):
+
             self._sampler.set_epoch(curr_epoch)
-            for 
-            if self.steps_run > self.total_steps:
-                break
-        for curr_step in range(self.steps_run, self.total_steps):
+            for batch in self._dataloader:
+                if curr_epoch == 1:
+                    import pdb
 
-            self._sampler.set_epoch(curr_step)
-            pbar = tqdm(total=self.total_steps)
-            with self._profiler:
+                    # pdb.set_trace()
 
-                if self._profiler_enabled:
-                    self._profiler.step()
+                pbar = tqdm(total=self._total_steps)
 
-                batch = next(self._dataloader).to(self._device)
+                batch = batch.to(self._device)
                 _, context_length = batch.shape
 
                 # step 1. generate the trajectory using:
@@ -682,7 +714,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     trajectory.scores,
                     trajectory.logprobs,
                     trajectory.ref_logprobs,
-                    self.kl_controller.value,
+                    self._kl_coeff,
                     trajectory.value_seq_idxs,
                 )
 
@@ -690,8 +722,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 advantages, returns = rlhf.estimate_advantages(
                     trajectory.values,
                     rewards,
-                    self.gamma,
-                    self.lmbda,
+                    self._gamma,
+                    self._lmbda,
                     masks=~trajectory.response_padding_masks,
                 )
                 advantages[trajectory.response_padding_masks] = 0.0
@@ -700,14 +732,14 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 ppo_stats = [
                     [],
                 ] * 6
-                for _ in range(self.ppo_epochs):
+                for _ in range(self._ppo_epochs):
                     batch_idxs = torch.randperm(self.batch_size, device=self._device)
-                    for i in range(0, self.batch_size, self.ppo_batch_size):
-                        mini_batch_idxs = batch_idxs[i : i + self.ppo_batch_size]
+                    for i in range(0, self.batch_size, self._ppo_batch_size):
+                        mini_batch_idxs = batch_idxs[i : i + self._ppo_batch_size]
 
                         batch_ppo_stats = [0] * 6
-                        for j in range(0, self.ppo_batch_size, self.ppo_backward_batch_size):
-                            backward_batch_idxs = mini_batch_idxs[j : j + self.ppo_backward_batch_size]
+                        for j in range(0, self._ppo_batch_size, self._ppo_backward_batch_size):
+                            backward_batch_idxs = mini_batch_idxs[j : j + self._ppo_backward_batch_size]
                             batch_trajectory = Trajectory(
                                 *map(
                                     partial(
@@ -741,18 +773,25 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                 # step 5. profit
 
-            self.steps_run += 1
-            ppo_stats = map(torch.tensor, ppo_stats)
-            self.log_metrics(
-                trajectory,
-                kl,
-                kl_rewards,
-                *ppo_stats,
-            )
-            self.kl_controller.update(kl.sum(1).mean().item(), self.steps_run)
-            self.cleanup_after_step(trajectory, advantages, returns, kl, kl_rewards)
-            self.save_checkpoint(curr_step)
-            pbar.update(1)
+                self._steps_run += 1
+                ppo_stats = map(torch.tensor, ppo_stats)
+                self.log_metrics(
+                    trajectory,
+                    kl,
+                    kl_rewards,
+                    *ppo_stats,
+                )
+                self.cleanup_after_step(trajectory, advantages, returns, kl, kl_rewards)
+                pbar.update(1)
+                if self._steps_run == self._total_steps:
+                    training_completed = True
+                    break
+
+            # save checkpoint at current epoch
+            self._epochs_run += 1
+            self.save_checkpoint(curr_epoch, is_intermediate_checkpoint=not training_completed)
+            if training_completed:
+                break
 
     def _ppo_step(
         self,
@@ -794,7 +833,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
         pi_logits = rlhf.query_response_logits_to_response_logits(pi_logits, context_length)
         pi_logprobs = rlhf.logits_to_logprobs(
-            pi_logits, trajectory.query_responses[:, context_length:], self.temperature
+            pi_logits, trajectory.query_responses[:, context_length:], self._temperature
         )
         pi_logprobs[trajectory.response_padding_masks] = 1.0
 

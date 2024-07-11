@@ -10,7 +10,6 @@ from ._generation import (
     get_causal_mask,
 )
 from .collate import left_padded_collate
-from .kl_controller import AdaptiveKLController, FixedKLController
 from .rewards import (
     estimate_advantages,
     get_reward_penalty_mask,
@@ -36,8 +35,6 @@ __all__ = [
     "get_reward_penalty_mask",
     "update_stop_tokens_tracker",
     "left_padded_collate",
-    "AdaptiveKLController",
-    "FixedKLController",
     "estimate_advantages",
     "get_rewards",
     "whiten",
