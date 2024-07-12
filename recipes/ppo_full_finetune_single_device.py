@@ -324,7 +324,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         if self.batch_size % self._forward_batch_size != 0:
             raise ValueError(
-                f"batch_size ({self.batch_size}) must be exactly divisible by"
+                f"batch_size ({self.batch_size}) must be exactly divisible by "
                 f"forward_batch_size ({self._forward_batch_size})."
             )
         if self.batch_size % self._ppo_batch_size != 0:
@@ -334,7 +334,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             )
         if self._ppo_batch_size % self._gradient_accumulation_steps != 0:
             raise ValueError(
-                f"ppo_batch_size ({self._ppo_batch_size}) must be exactly divisible"
+                f"ppo_batch_size ({self._ppo_batch_size}) must be exactly divisible "
                 f"by gradient_accumulation_steps ({self._gradient_accumulation_steps})."
             )
 
@@ -359,6 +359,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 f"the number of batches in the dataset ({batches_per_epoch})."
                 f"Intermediate checkpoints will only be saved every {batches_per_epoch} steps."
             )
+        log.info(
+            f"Total steps to run: {self._total_steps}, Total epochs to run: {self._total_epochs}"
+        )
 
     def _setup_checkpointers(
         self,
@@ -798,7 +801,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         training_completed = False
         pbar = tqdm(total=self._total_steps, initial=self._steps_run)
         for curr_epoch in range(self._epochs_run, self._total_epochs):
-
+            log.info(f"Starting epoch {curr_epoch + 1} of {self._total_epochs}")
             self._sampler.set_epoch(curr_epoch)
             for batch in self._dataloader:
                 # if curr_epoch == 1:
@@ -893,6 +896,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                         self.global_step += 1
 
                 # step 5. profit
+                print(f"completed step: {self._steps_run}")
                 self._steps_run += 1
                 self.log_metrics(
                     trajectory,
@@ -1028,6 +1032,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         }
         if self._device.type == "cuda" and self._log_peak_memory_stats:
             log_dict.update(utils.get_memory_stats(device=self._device))
+        print(log_dict)
         self._metric_logger.log_dict(log_dict, step=self.global_step)
 
     def cleanup_after_step(
