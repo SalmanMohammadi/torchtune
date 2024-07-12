@@ -75,7 +75,7 @@ checkpointer:
   ]
   # this is the only place where you should update `recipe_checkpoint` if resuming training
   recipe_checkpoint: null
-  output_dir: ${output_dir} / policy
+  output_dir: ${output_dir}/policy
   model_type: LLAMA2
 
 # this should be setup identically to the policy model checkpointer at the start of training
@@ -99,7 +99,7 @@ value_checkpointer:
   checkpoint_files: [
       "model.safetensors"
   ]
-  output_dir: ${output_dir} / value
+  output_dir: ${output_dir}/value
   model_type: MISTRAL_REWARD
 
 # checkpointer for the reward model, ensure `checkpoint_files`
@@ -173,8 +173,10 @@ dtype: bf16
 
 # Logging
 metric_logger:
-  _component_: torchtune.utils.metric_logging.StdoutLogger
+  _component_: torchtune.utils.metric_logging.DiskLogger
   log_dir: ${output_dir}
+  # _component_: torchtune.utils.metric_logging.StdoutLogger
+  # log_dir: ${output_dir}
   # _component_: torchtune.utils.metric_logging.WandBLogger
   # project: torchtune_ppo
 

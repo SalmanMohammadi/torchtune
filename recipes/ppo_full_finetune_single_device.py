@@ -24,7 +24,7 @@ from torchtune.modules import rlhf
 from torchtune.recipe_interfaces import FTRecipeInterface
 from tqdm import tqdm
 
-log = utils.get_logger("DEBUG")
+log = utils.get_logger("INFO")
 
 Checkpointer = Union[
     utils.FullModelHFCheckpointer,
@@ -286,13 +286,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         if cfg.get("stop_token_ids", False):
             stop_token_ids = cfg.stop_token_ids
             if self._tokenizer.eos_id not in stop_token_ids:
-                log.warn(
+                warn(
                     f"tokenizer eos_id ({self._tokenizer.eos_id}) is not in stop_token_ids ({stop_token_ids})."
                     "This may lead to unexpected behaviour."
                 )
         else:
             if not hasattr(self._tokenizer.stop_tokens):
-                log.warn(
+                warn(
                     "No stop tokens defined in tokenizer, and no stop_token_ids provided. This may lead to unexpected behaviour."
                 )
                 stop_token_ids = []
@@ -541,23 +541,21 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 model=self._value_model, optim_dict=optim_dict
             )
             # Create a wrapper for checkpoint save/load of optimizer states when running in backward.
-            self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
-                model=self._model, optim_dict=optim_dict
-            )
-            self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
-                model=self._value_model, optim_dict=optim_dict
-            )
-            # Load optimizer states. If optimizer states are being restored in an optimizer in backward
-            # run, these need to have been saved with the same setting. Cannot restore from runs that did not
-            # use optimizer in backward.
-            if opt_state_dict is not None:
-                try:
-                    self._optim_ckpt_wrapper.load_state_dict(opt_state_dict)
-                except BaseException as e:
-                    raise RuntimeError(
-                        "Failed loading in-backward optimizer checkpoints."
-                        "Please make sure run being restored from was using in-backward optimizer."
-                    ) from e
+            # self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(model=self._model, optim_dict=optim_dict)
+            # self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
+            #     model=self._value_model, optim_dict=optim_dict
+            # )
+            # # Load optimizer states. If optimizer states are being restored in an optimizer in backward
+            # # run, these need to have been saved with the same setting. Cannot restore from runs that did not
+            # # use optimizer in backward.
+            # if opt_state_dict is not None:
+            #     try:
+            #         self._optim_ckpt_wrapper.load_state_dict(opt_state_dict)
+            #     except BaseException as e:
+            #         raise RuntimeError(
+            #             "Failed loading in-backward optimizer checkpoints."
+            #             "Please make sure run being restored from was using in-backward optimizer."
+            #         ) from e
             log.info("In-backward optimizers are set up.")
             return None
         else:
