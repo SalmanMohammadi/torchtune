@@ -38,7 +38,7 @@ dataset:
   column: prompt
 
 seed: null
-shuffle: False
+shuffle: True
 
 policy_model:
   _component_: torchtune.models.llama2.llama2
@@ -162,7 +162,7 @@ loss:
   value_clip_range: 0.2
 
 # Training env
-device: cuda
+device: mps
 
 # Memory management
 enable_activation_checkpointing: False

@@ -23,3 +23,4 @@ SEED_KEY = "seed"
 # (total_epochs - epochs_run) number of epochs
 TOTAL_EPOCHS_KEY = "total_epochs"
 STEPS_KEY = "steps_run"
+RNG_KEY = "rng_state"

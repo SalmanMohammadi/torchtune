@@ -7,11 +7,11 @@
 import os
 
 import runpy
-
 import sys
 from pathlib import Path
 
 import pytest
+import torch
 from tests.common import TUNE_PATH
 
 from tests.recipes.utils import (
@@ -60,13 +60,18 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
         log_file = gen_log_file_name(tmpdir)
         policy_tmpdir = (tmpdir / "policy").mkdir()
         value_tmpdir = (tmpdir / "value").mkdir()
+
         # Config file needed for model conversion.
         # Create a second copy for training resume
         write_hf_ckpt_config(ckpt_dir)
         write_hf_ckpt_config(policy_tmpdir)
         write_hf_ckpt_config(value_tmpdir)
 
-        # Train for two steps
+        # There are 4 steps in total (num_steps / batch size)
+        # and the dataset has 8 samples, so each epoch will be 2 batches
+        # a single step is a single batch update, and we checkpoint at every epoch (2 steps)
+        # so we're expecting a checkpoint at step 2. The idea here is to train for 4 steps,
+        # resume after 2, and ensure the losses for the final two steps after resuming are identical
         cmd_1 = f"""
         tune run ppo_full_finetune_single_device \
             --config llama2/1B_full_ppo_single_device \
@@ -97,22 +102,28 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
 
         reward_and_value_model_config = llama2_classifier_test_config()
         reward_and_value_model_config = [
-            k.replace("model.", "reward_and_value_model.") for k in reward_and_value_model_config
+            k.replace("model.", "reward_and_value_model.")
+            for k in reward_and_value_model_config
         ]
-        reward_and_value_model_config += ["reward_and_value_model.intermediate_dim=null"]
-        cmd_1 = cmd_1 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
+        reward_and_value_model_config += [
+            "reward_and_value_model.intermediate_dim=null"
+        ]
+        cmd_1 = (
+            cmd_1
+            + self._get_test_config_overrides()
+            + model_config
+            + reward_and_value_model_config
+        )
 
         monkeypatch.setattr(sys, "argv", cmd_1)
         with pytest.raises(SystemExit, match=""):
             runpy.run_path(TUNE_PATH, run_name="__main__")
-        import pdb
 
         loss_values = get_loss_values_from_metric_logger(log_file)
 
-        # # Resume training
+        # Resume training at step 2
         resumed_log_dir = (tmpdir / "resumed/").mkdir()
         resumed_log_file = gen_log_file_name(resumed_log_dir)
-        print("resuming training ======================")
         cmd_2 = f"""
         tune run ppo_full_finetune_single_device \
             --config llama2/1B_full_ppo_single_device \
@@ -137,18 +148,22 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
             resume_from_checkpoint=True \
             metric_logger._component_=torchtune.utils.metric_logging.DiskLogger \
             metric_logger.filename={resumed_log_file} \
-
         """.split()
 
-        cmd_2 = cmd_2 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
+        cmd_2 = (
+            cmd_2
+            + self._get_test_config_overrides()
+            + model_config
+            + reward_and_value_model_config
+        )
 
         monkeypatch.setattr(sys, "argv", cmd_2)
         with pytest.raises(SystemExit, match=""):
             runpy.run_path(TUNE_PATH, run_name="__main__")
 
-        # expected_loss_values = self._fetch_expected_loss_values()[2:]
+        resumed_loss_values = get_loss_values_from_metric_logger(resumed_log_file)
 
-        new_loss_values = get_loss_values_from_metric_logger(resumed_log_file)
-
-        pdb.set_trace()
-        # torch.testing.assert_close(loss_values, expected_loss_values, rtol=1e-4, atol=1e-4)
+        # losses at each step are (loss, policy_loss, value_loss)
+        torch.testing.assert_close(
+            loss_values[6:], resumed_loss_values, rtol=1e-4, atol=1e-4
+        )

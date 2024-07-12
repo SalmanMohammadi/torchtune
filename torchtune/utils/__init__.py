@@ -48,9 +48,10 @@ from .constants import (  # noqa
     MAX_STEPS_KEY,
     MODEL_KEY,
     OPT_KEY,
+    RNG_KEY,
     SEED_KEY,
-    TOTAL_EPOCHS_KEY,
     STEPS_KEY,
+    TOTAL_EPOCHS_KEY,
 )
 from .logging import get_logger
 from .memory import (  # noqa

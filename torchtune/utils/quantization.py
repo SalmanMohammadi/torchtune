@@ -10,7 +10,7 @@ import torch
 from torchao.quantization.quant_api import (
     Int4WeightOnlyGPTQQuantizer,
     Int4WeightOnlyQuantizer,
-    quantize_,
+    quantize,
     Quantizer,
 )
 
@@ -28,8 +28,10 @@ __all__ = [
 
 
 class Int8WeightOnlyQuantizer(Quantizer):
-    def quantize(self, model: torch.nn.Module, *args: Any, **kwargs: Any) -> torch.nn.Module:
-        return quantize_(model, "int8_weight_only")
+    def quantize(
+        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+    ) -> torch.nn.Module:
+        return quantize(model, "int8_weight_only")
 
 
 _quantizer_to_mode = {

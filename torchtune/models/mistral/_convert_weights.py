@@ -66,6 +66,8 @@ def mistral_reward_hf_to_tune(
         )
 
     for key, value in state_dict.items():
+        if key == "score.bias":
+            continue
         if "rotary_emb.inv_freq" not in key:  # Skip loading the position embeddings
             new_key = get_mapped_key(key, _MISTRAL_REWARD)
         if "q_proj" in key:

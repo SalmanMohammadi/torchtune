@@ -8,7 +8,35 @@ from typing import Optional, Tuple
 
 import torch
 from torchtune.modules.transformer import TransformerDecoder
-from torchtune.utils._generation import sample
+
+
+def multinomial_sample_one(
+    probs: torch.Tensor, rng: Optional[torch.Generator] = None
+) -> torch.Tensor:
+    """Samples from a multinomial distribution."""
+    q = torch.empty_like(probs).exponential_(1, generator=rng)
+    return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
+
+
+def sample(
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: int = None,
+    rng: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    """Generic sample from a probability distribution."""
+    # scale the logits based on temperature
+    logits = logits / max(temperature, 1e-5)
+    if top_k is not None:
+        v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+        # select the very last value from the top_k above as the pivot
+        pivot = v.select(-1, -1).unsqueeze(-1)
+        # set everything smaller than pivot value to inf since these
+        # should be pruned
+        logits = torch.where(logits < pivot, -float("Inf"), logits)
+    # change logits into probabilities
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    return multinomial_sample_one(probs, rng)
 
 
 def generate_next_token_with_logits(
@@ -18,7 +46,8 @@ def generate_next_token_with_logits(
     *,
     mask: Optional[torch.Tensor] = None,
     temperature: float = 1.0,
-    top_k: int = None,
+    top_k: Optional[int] = None,
+    rng: Optional[torch.Generator] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Generates the next tokens given a prompt, and also returns the corresponding logits.
@@ -33,7 +62,7 @@ def generate_next_token_with_logits(
             default None.
         temperature (float): value to scale the predicted logits by, default 1.0.
         top_k (int): Top-k value to use for sampling, default None.
-
+        rng (Optional[torch.Generator]): random number generator, default None.
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: tuple of two tensors:
             - logits (torch.Tensor): tensor with the logits associated with the generated tokens,
@@ -45,7 +74,7 @@ def generate_next_token_with_logits(
     # model produces logits in [bsz, seq_length, vocab_size]
     # we want to take the last token's logits as the input to the next model call
     logits = model(x, input_pos=input_pos, mask=mask)
-    return logits, sample(logits[:, -1], temperature, top_k)
+    return logits, sample(logits[:, -1].clone(), temperature, top_k, rng)
 
 
 def get_causal_mask(
@@ -81,7 +110,8 @@ def generate_with_logits(
     max_generated_tokens: int,
     pad_id: int = 0,
     temperature: float = 1.0,
-    top_k=None,
+    top_k: Optional[int] = None,
+    rng: Optional[torch.Generator] = None,
 ):
     """
     Generates tokens from a model conditioned on a prompt, and also returns logits for the generations.
@@ -95,12 +125,15 @@ def generate_with_logits(
         temperature (float): value to scale the predicted logits by, default 1.0.
         top_k (Optional[int]): If specified, we prune the sampling to only token ids within the top_k probabilities,
             default None.
+        rng (Optional[torch.Generator]): random number generator, default None.
 
     Examples:
         >>> model = torchtune.models.llama3.llama3_8b()
         >>> tokenizer = torchtune.models.llama3.llama3_tokenizer()
         >>> prompt = [0, 0, 0] + tokenizer("Hi my name is") # substitute 0 with pad_id
-        >>> output = generate(model, torch.tensor(prompt), max_generated_tokens=100)
+        >>> rng = torch.Generator() # optionally place on device
+        >>> rng.manual_seed(42)
+        >>> output = generate(model, torch.tensor(prompt), max_generated_tokens=100, pad_id=0, rng=rng)
         >>> print(tokenizer.decode(output[0]))
         ?? ?? ?? Hi my name is Jeremy and I'm a friendly language model assistant!
 
@@ -131,6 +164,7 @@ def generate_with_logits(
             mask=mask,
             temperature=temperature,
             top_k=top_k,
+            rng=rng,
         )
 
         generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
