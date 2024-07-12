@@ -775,7 +775,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     masks=~trajectory.response_padding_masks,
                 )
                 advantages[trajectory.response_padding_masks] = 0.0
-
+                if self._device.type == "cuda" and self._log_peak_memory_stats:
+                    self._metric_logger.log_dict(utils.get_memory_stats(device=self._device), step=self.global_step)
                 # step 4. optimise using the PPO objective over multiple epochs
                 ppo_stats = [
                     [],
@@ -799,6 +800,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 )
                             )
                             print(f"backward step {j}")
+                            if self._device.type == "cuda" and self._log_peak_memory_stats:
+                                self._metric_logger.log_dict(
+                                    utils.get_memory_stats(device=self._device), step=self.global_step
+                                )
                             backward_ppo_stats = self._ppo_step(
                                 batch_trajectory,
                                 advantages[backward_batch_idxs],
@@ -911,7 +916,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         loss /= self._gradient_accumulation_steps
-
+        if self._device.type == "cuda" and self._log_peak_memory_stats:
+            self._metric_logger.log_dict(utils.get_memory_stats(device=self._device), step=self.global_step)
         loss.backward()
 
         policy_loss /= self._gradient_accumulation_steps
@@ -952,7 +958,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         }
         if self._device.type == "cuda" and self._log_peak_memory_stats:
             log_dict.update(utils.get_memory_stats(device=self._device))
-        print(log_dict)
+
         self._metric_logger.log_dict(log_dict, step=self.global_step)
 
     def cleanup_after_step(
