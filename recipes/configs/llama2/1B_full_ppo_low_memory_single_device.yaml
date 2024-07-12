@@ -163,7 +163,7 @@ loss:
   value_clip_range: 0.2
 
 # Training env
-device: mps
+device: cuda
 
 # Memory management
 enable_activation_checkpointing: True
@@ -179,9 +179,8 @@ metric_logger:
   # project: torchtune_ppo
 
 
-num_sample_generations: 1
 log_every_n_steps: 1
-log_peak_memory_stats: False
+log_peak_memory_stats: True
 
 profiler:
   _component_: torchtune.utils.profiler

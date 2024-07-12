@@ -51,8 +51,10 @@ Trajectory = NamedTuple(
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     def __init__(self, cfg: DictConfig) -> None:
 
-        # self._device = utils.get_device(device=cfg.device)
-        self._device = torch.device("mps")
+        if cfg.device == "mps":
+            self._device = torch.device("mps")
+        else:
+            self._device = utils.get_device(device=cfg.device)
         # Reduced precision logic
         self._dtype = utils.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
@@ -985,6 +987,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             "clipfrac": clipfrac.mean(),
             "ratios": ratios.mean(),
         }
+        if self._device.type == "cuda" and self._log_peak_memory_stats:
+            log_dict.update(utils.get_memory_stats(device=self._device))
         self._metric_logger.log_dict(log_dict, step=self.global_step)
 
     def cleanup_after_step(
