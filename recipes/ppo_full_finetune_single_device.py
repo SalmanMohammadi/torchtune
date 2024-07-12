@@ -51,8 +51,8 @@ Trajectory = NamedTuple(
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     def __init__(self, cfg: DictConfig) -> None:
 
-        self._device = utils.get_device(device=cfg.device)
-        # self._device = torch.device("mps")
+        # self._device = utils.get_device(device=cfg.device)
+        self._device = torch.device("mps")
         # Reduced precision logic
         self._dtype = utils.get_dtype(cfg.dtype, device=self._device)
         # fp16 precision is explicitly disabled as it is not supported in this
@@ -485,12 +485,15 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             # between ref policy and current policy
             for module in model.modules():
                 if isinstance(module, torch.nn.Dropout):
+                    warn(
+                        f"Dropout found in {module}. This is likely to cause issues during training. Disabling."
+                    )
                     module.p = 0
 
         # Compile model, if enabled.
         if compile_model:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
-
+            backend = "aot_eager"  # TODO (SalmanMohammadi)
             log.info("Compiling policy model with torch.compile...")
             policy_model.compile(backend=backend)
 
@@ -516,7 +519,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self, cfg_optimizer: DictConfig, opt_state_dict: Optional[Dict[str, Any]] = None
     ) -> Optimizer:
 
-        # not sure if chain is necessary?
         optimizer = config.instantiate(
             cfg_optimizer,
             chain(self._policy_model.parameters(), self._value_model.parameters()),

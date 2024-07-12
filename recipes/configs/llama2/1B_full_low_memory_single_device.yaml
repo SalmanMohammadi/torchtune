@@ -150,9 +150,9 @@ kl_coeff: 0.01
 # optimizer_in_bwd: True
 
 optimizer:
-  _component_: torch.optim.AdamW
-  weight_decay: 0.01
-  lr: 3e-6
+  _component_: bitsandbytes.optim.PagedAdamW
+  lr: 2e-5
+optimizer_in_bwd: True
 
 loss:
   _component_: torchtune.modules.loss.PPOLoss
@@ -166,7 +166,7 @@ loss:
 device: mps
 
 # Memory management
-enable_activation_checkpointing: False
+enable_activation_checkpointing: True
 
 # Reduced precision
 dtype: bf16
