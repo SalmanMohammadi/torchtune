@@ -70,6 +70,7 @@ def dummy_text_completion_dataset_config():
         "dataset.column='prompt'",
         "dataset.split='train'",
         "dataset.max_seq_len=null",
+        "dataset.add_eos=False",
     ]
     return out
 

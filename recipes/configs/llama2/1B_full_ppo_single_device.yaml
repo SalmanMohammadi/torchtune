@@ -36,6 +36,7 @@ dataset:
   max_seq_len: null
   split: train
   column: prompt
+  add_eos: False
 
 seed: null
 shuffle: True
