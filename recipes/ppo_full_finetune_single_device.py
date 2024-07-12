@@ -227,6 +227,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # checkpoint. Transforming the opt state dict is handled by this method
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
+            optimizer_in_bwd=cfg.optimizer_in_bwd,
             opt_state_dict=(
                 policy_model_checkpoint_dict[utils.OPT_KEY]
                 if self._resume_from_checkpoint
@@ -245,22 +246,19 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             batch_size=cfg.batch_size,
         )
 
-        # #
-
         self._setup_training_parameters(cfg)
         self._setup_training_hyperparameters(cfg)
 
-        #
         if self._resume_from_checkpoint:
             self._update_recipe_state(policy_model_checkpoint_dict)
 
-        # #
         # one "step" is a single gradient update update over a minibatch of trajectories
         self.global_step = (
             self._steps_run
             * self._ppo_epochs
             * (self.batch_size // self._ppo_batch_size)
         )
+        self._optimizer_in_bwd = cfg.optimizer_in_bwd
 
     def _setup_training_hyperparameters(self, cfg) -> None:
         """
@@ -518,18 +516,47 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         return policy_model, value_model, reward_model, ref_policy_model
 
     def _setup_optimizer(
-        self, cfg_optimizer: DictConfig, opt_state_dict: Optional[Dict[str, Any]] = None
+        self,
+        cfg_optimizer: DictConfig,
+        optimizer_in_bwd: bool = False,
+        opt_state_dict: Optional[Dict[str, Any]] = None,
     ) -> Optimizer:
 
-        optimizer = config.instantiate(
-            cfg_optimizer,
-            chain(self._policy_model.parameters(), self._value_model.parameters()),
-        )
-        if opt_state_dict:
-            optimizer.load_state_dict(opt_state_dict)
+        if optimizer_in_bwd:
+            # Maintain a dict of optims for every parameter.
+            optim_dict = {
+                p: config.instantiate(cfg_optimizer, [p])
+                for p in self._model.parameters()
+            }
+            # Register optimizer step hooks on the model to run optimizer in backward.
+            utils.register_optim_in_bwd_hooks(model=self._model, optim_dict=optim_dict)
+            # Create a wrapper for checkpoint save/load of optimizer states when running in backward.
+            self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
+                model=self._model, optim_dict=optim_dict
+            )
+            # Load optimizer states. If optimizer states are being restored in an optimizer in backward
+            # run, these need to have been saved with the same setting. Cannot restore from runs that did not
+            # use optimizer in backward.
+            if opt_state_dict is not None:
+                try:
+                    self._optim_ckpt_wrapper.load_state_dict(opt_state_dict)
+                except BaseException as e:
+                    raise RuntimeError(
+                        "Failed loading in-backward optimizer checkpoints."
+                        "Please make sure run being restored from was using in-backward optimizer."
+                    ) from e
+            log.info("In-backward optimizers are set up.")
+            return None
+        else:
+            optimizer = config.instantiate(
+                cfg_optimizer,
+                chain(self._policy_model.parameters(), self._value_model.parameters()),
+            )
+            if opt_state_dict:
+                optimizer.load_state_dict(opt_state_dict)
 
-        log.info("Optimizer is initialized.")
-        return optimizer
+            log.info("Optimizer is initialized.")
+            return optimizer
 
     def _setup_lr_scheduler(
         self,
@@ -849,8 +876,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 ppo_stats, batch_ppo_stats
                             )
                         ]
-                        self._optimizer.step()
-                        self._optimizer.zero_grad()
+                        if not self._optimizer_in_bwd:
+                            self._optimizer.step()
+                            self._optimizer.zero_grad(set_to_none=True)
+
                         self.global_step += 1
 
                 # step 5. profit
@@ -869,9 +898,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
             # save checkpoint at current epoch
             self._epochs_run += 1
-            self.save_checkpoint(
-                curr_epoch, is_intermediate_checkpoint=not training_completed
-            )
+            # self.save_checkpoint(
+            #     curr_epoch, is_intermediate_checkpoint=not training_completed
+            # )
             if training_completed:
                 break
 
