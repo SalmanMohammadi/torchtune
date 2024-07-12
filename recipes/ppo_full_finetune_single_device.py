@@ -526,13 +526,23 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             # Maintain a dict of optims for every parameter.
             optim_dict = {
                 p: config.instantiate(cfg_optimizer, [p])
-                for p in self._model.parameters()
+                for p in chain(
+                    self._policy_model.parameters(), self._value_model.parameters()
+                )
             }
             # Register optimizer step hooks on the model to run optimizer in backward.
-            utils.register_optim_in_bwd_hooks(model=self._model, optim_dict=optim_dict)
+            utils.register_optim_in_bwd_hooks(
+                model=self._policy_model, optim_dict=optim_dict
+            )
+            utils.register_optim_in_bwd_hooks(
+                model=self._value_model, optim_dict=optim_dict
+            )
             # Create a wrapper for checkpoint save/load of optimizer states when running in backward.
             self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
                 model=self._model, optim_dict=optim_dict
+            )
+            self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
+                model=self._value_model, optim_dict=optim_dict
             )
             # Load optimizer states. If optimizer states are being restored in an optimizer in backward
             # run, these need to have been saved with the same setting. Cannot restore from runs that did not
