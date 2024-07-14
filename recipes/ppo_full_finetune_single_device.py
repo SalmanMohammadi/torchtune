@@ -870,6 +870,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 ppo_stats, batch_ppo_stats
                             )
                         ]
+
                         if not self._optimizer_in_bwd:
                             self._optimizer.step()
                             self._optimizer.zero_grad(set_to_none=True)
@@ -979,7 +980,14 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 0.5 * (pi_logprobs - trajectory.logprobs).pow(2)
             ).mean()
 
-        return loss, policy_loss, value_loss, approx_policy_kls, ratios, clipfrac
+        return (
+            loss,
+            policy_loss,
+            value_loss,
+            approx_policy_kls / self._gradient_accumulation_steps,
+            ratios / self._gradient_accumulation_steps,
+            clipfrac / self._gradient_accumulation_steps,
+        )
 
     def log_metrics(
         self,
@@ -996,6 +1004,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         Log metrics and statistics for the current step to the metric logger.
         """
+        print(f"ratios {ratios}, mean {ratios.mean()}")
         log_dict = {
             "scores": trajectory.scores.mean(),
             "num_stop_tokens": trajectory.response_padding_masks.any(-1).sum(),
