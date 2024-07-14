@@ -150,8 +150,10 @@ kl_coeff: 0.01
 # optimizer_in_bwd: True
 
 optimizer:
-  _component_: bitsandbytes.optim.PagedAdamW
-  lr: 2e-5
+  _component_: torch.optim.AdamW
+  weight_decay: 0.01
+  lr: 3e-6
+
 optimizer_in_bwd: True
 
 loss:

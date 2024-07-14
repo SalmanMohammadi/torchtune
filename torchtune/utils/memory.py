@@ -202,6 +202,11 @@ def get_memory_stats(device: torch.device, reset_stats: bool = True) -> dict:
     Raises:
         ValueError: If the passed-in device is not CUDA.
     """
+    if device.type == "mps":
+        return {
+            "current_allocated_memory": torch.mps.current_allocated_memory() / 1e9,
+            "driver_allocated_memory": torch.mps.driver_allocated_memory() / 1e9,
+        }
     if device.type != "cuda":
         raise ValueError(
             f"Logging memory stats is only supported on CUDA devices, got {device}"
