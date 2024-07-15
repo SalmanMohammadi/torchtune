@@ -19,7 +19,7 @@
 # You can add specific overrides through the command line. For example
 # to override the checkpointer directory while launching training
 # you can run:
-#   tune run full_finetune_single_device --config mistral/7B_full_low_memory checkpointer.checkpoint_dir=<YOUR_CHECKPOINT_DIR>
+#   tune run ppo_full_finetune_single_device --config mistral/7B_full_low_memory checkpointer.checkpoint_dir=<YOUR_CHECKPOINT_DIR>
 #
 
 # Tokenizer
@@ -111,7 +111,7 @@ reward_checkpointer:
 
 resume_from_checkpoint: False
 output_dir: /tmp/mistral7b-ppo-finetune
-seed: 42
+seed: null
 shuffle: True
 
 # Training env

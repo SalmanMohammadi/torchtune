@@ -74,7 +74,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
         # resume after 2, and ensure the losses for the final two steps after resuming are identical
         cmd_1 = f"""
         tune run ppo_full_finetune_single_device \
-            --config llama2/1B_full_ppo_single_device \
+            --config llama2/1B_full_ppo \
             output_dir={tmpdir} \
             checkpointer._component_=torchtune.utils.FullModelHFCheckpointer \
             checkpointer.checkpoint_dir='{ckpt_dir}' \
@@ -126,7 +126,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
         resumed_log_file = gen_log_file_name(resumed_log_dir)
         cmd_2 = f"""
         tune run ppo_full_finetune_single_device \
-            --config llama2/1B_full_ppo_single_device \
+            --config llama2/1B_full_ppo \
             output_dir={tmpdir} \
             checkpointer._component_=torchtune.utils.FullModelHFCheckpointer \
             checkpointer.checkpoint_dir='{policy_tmpdir}' \
