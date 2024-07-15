@@ -55,8 +55,21 @@ shuffle: True
 policy_model:
   _component_: torchtune.models.mistral.mistral_7b
 
+# we need to manually build the mistral classifier model
+# because our checkpoint has a larger vocabulary size (due to an added padding token)
 reward_and_value_model:
-  _component_: torchtune.models.mistral.mistral_classifier_7b
+  _component_: torchtune.models.mistral._component_builders.mistral_classifier
+  attn_dropout: 0.0
+  embed_dim: 4096
+  intermediate_dim: 14336
+  max_seq_len: 32768
+  norm_eps: 1.0e-05
+  num_classes: 1
+  num_heads: 32
+  num_kv_heads: 8
+  num_layers: 32
+  vocab_size: 32001
+
 # checkpointer for the policy model - update this if resuming from checkpoint
 checkpointer:
   _component_: torchtune.utils.FullModelHFCheckpointer
@@ -122,16 +135,16 @@ resume_from_checkpoint: False
 output_dir: ./target/7b/output
 
 # Fine-tuning arguments
-batch_size: 4
-num_steps: 1024
-ppo_epochs: 1
-ppo_batch_size: 1
+batch_size: 256
+num_steps: 10000
+ppo_epochs: 4
+ppo_batch_size: 8
 gradient_accumulation_steps: 1
 whiten_rewards: False
-compile: False
+compile: True
 
 # Generation arguments
-forward_batch_size: 1
+forward_batch_size: 8
 max_generated_tokens: 58
 temperature: 1.0
 top_k: null
@@ -142,22 +155,17 @@ penalise_no_eos: True
 reward_penalty: -3
 stop_token_ids: [
   # 2,
-  29889
+  28723
 ]
   # 29889
 
 kl_coeff: 0.01
-# optimizer:
-#   _component_: bitsandbytes.optim.PagedAdamW
-#   lr: 3e-4
-# optimizer_in_bwd: True
 
 optimizer:
-  _component_: torch.optim.SGD
-  weight_decay: 0.01
+  _component_: bitsandbytes.optim.PagedAdamW
   lr: 3e-6
-
 optimizer_in_bwd: True
+
 
 loss:
   _component_: torchtune.modules.loss.PPOLoss

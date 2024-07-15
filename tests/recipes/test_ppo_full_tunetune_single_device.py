@@ -70,7 +70,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
         # There are 4 steps in total (num_steps / batch size)
         # and the dataset has 8 samples, so each epoch will be 2 batches
         # a single step is a single batch update, and we checkpoint at every epoch (2 steps)
-        # so we're expecting a checkpoint at step 2. The idea here is to train for 4 steps,
+        # so we're expecting an intermediate checkpoint at step 2. The idea here is to train for 4 steps,
         # resume after 2, and ensure the losses for the final two steps after resuming are identical
         cmd_1 = f"""
         tune run ppo_full_finetune_single_device \

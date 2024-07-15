@@ -45,6 +45,7 @@ Trajectory = NamedTuple(
         ("value_padding_masks", torch.Tensor),
         ("value_seq_idxs", torch.Tensor),
         ("scores", torch.Tensor),
+        ("seq_lens", torch.Tensor),
     ],
 )
 
@@ -313,6 +314,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 - batch_size is not divisible by ppo_batch_size
                 - ppo_batch_size is not divisible by gradient_accumulation_steps
                 - num_steps is less than batch_size
+                - gradient_accumulation_steps > 1 and optimizer_in_bwd is True
         """
         self.batch_size = cfg.batch_size
         self._forward_batch_size = cfg.forward_batch_size
@@ -337,6 +339,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             raise ValueError(
                 f"ppo_batch_size ({self._ppo_batch_size}) must be exactly divisible "
                 f"by gradient_accumulation_steps ({self._gradient_accumulation_steps})."
+            )
+
+        if self._gradient_accumulation_steps > 1 and self._optimizer_in_bwd:
+            raise RuntimeError(
+                "Gradient accumulation is not supported with optimizer in bwd."
+                "Please set gradient_accumulation_steps=1, or optimizer_in_bwd=False."
             )
 
         self._total_steps = cfg.num_steps // self.batch_size
@@ -761,6 +769,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             value_padding_masks=value_padding_masks,
             value_seq_idxs=value_seq_idxs,
             scores=scores,
+            seq_lens=seq_lens,
         )
 
     def generate_trajectory_batched(self, input_ids: torch.Tensor) -> Trajectory:
@@ -893,9 +902,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
             # save checkpoint at current epoch
             self._epochs_run += 1
-            # self.save_checkpoint(
-            #     curr_epoch, is_intermediate_checkpoint=not training_completed
-            # )
+            self.save_checkpoint(
+                curr_epoch, is_intermediate_checkpoint=not training_completed
+            )
             if training_completed:
                 break
 
@@ -1017,6 +1026,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             "approx_policy_kl": approx_policy_kls.mean(),
             "clipfrac": clipfrac.mean(),
             "ratios": ratios.mean(),
+            "response_lengths": trajectory.seq_lens.float().mean(),
         }
         if self._device.type in ["cuda"] and self._log_peak_memory_stats:
             log_dict.update(utils.get_memory_stats(device=self._device))

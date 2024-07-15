@@ -115,7 +115,7 @@ def generate(
     stop_token_mask = torch.ones(
         (bsz, prompt_length + 1), dtype=torch.int32, device=prompt.device
     )
-
+    stop_tokens = stop_tokens.to(torch.int32)
     if custom_generate_next_token is None:
         custom_generate_next_token = generate_next_token
 
