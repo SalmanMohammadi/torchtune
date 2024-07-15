@@ -81,7 +81,7 @@ def get_causal_mask(
     padding_mask: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Converts an attention mask of shape `[bsz, seq_len]` to a causal attention mask suitable for
+    Converts an attention mask of shape ``[bsz, seq_len]`` to a causal attention mask suitable for
     consumption by :func:`~torch.nn.functional.scaled_dot_product_attention~`.
 
     HF uses a similar implementation internally, see

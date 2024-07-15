@@ -13,16 +13,17 @@ from torchtune.modules import rlhf
 
 class PPOLoss(nn.Module):
     """
-    Proximal Policy Optimization (PPO) Loss module: https://arxiv.org/abs/1707.06347.
+    Proximal Policy Optimization (PPO) Loss module.
+    This implementation uses the following references:
 
-    Using:
-        https://github.com/vwxyzjn/lm-human-preference-details/blob/ccc19538e817e98a60d3253242ac15e2a562cb49/lm_human_preference_details/train_policy_accelerate.py#L719
-        https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/model.py#L68-L75
+    https://arxiv.org/abs/1707.06347
 
-    as references.
+    https://github.com/vwxyzjn/lm-human-preference-details/blob/ccc19538e817e98a60d3253242ac15e2a562cb49/lm_human_preference_details/train_policy_accelerate.py#L719
+
+    https://github.com/openai/baselines/blob/ea25b9e8b234e6ee1bca43083f8f3cf974143998/baselines/ppo2/model.py#L68-L75
+
+
     Args:
-        gamma (float): Discount factor.
-        lmbda (float): lambda parameter for GAE.
         epsilon (float): clipping range for PPO update.
         value_clip_range (float): clipping range for value function update.
         value_coeff (float): coefficient for the value function loss contribution.
@@ -30,15 +31,11 @@ class PPOLoss(nn.Module):
 
     def __init__(
         self,
-        gamma: float = 1.0,
-        lmbda: float = 0.95,
         epsilon: float = 0.1,
         value_clip_range: float = 0.2,
         value_coeff: float = 0.1,
     ):
         super().__init__()
-        self.gamma = gamma
-        self.lmbda = lmbda
         self.epsilon = epsilon
         self.value_clip_range = value_clip_range
         self.value_coeff = value_coeff
@@ -63,9 +60,9 @@ class PPOLoss(nn.Module):
             advantage (torch.Tensor): Advantage values.
             values (torch.Tensor): Value predictions.
             returns (torch.Tensor): Return values.
-            padding_masks (Optional[torch.Tensor]): Padding token masks of the same shape as `pi_logprobs`,
+            padding_masks (Optional[torch.Tensor]): Padding token masks of the same shape as ``pi_logprobs``,
                 where True indicates the corresponding loss values should participage in policy loss calculation.
-            value_padding_masks (Optional[torch.Tensor]): Padding token masks of the same shape as `pi_logprobs`,
+            value_padding_masks (Optional[torch.Tensor]): Padding token masks of the same shape as ``pi_logprobs``,
                 where True indicates the corresponding loss values should participage in value loss calculation.
 
         Returns:

@@ -54,7 +54,7 @@ class TestGetRewards:
             ]
         )
 
-        rewards, kl, kl_rewards = rlhf.get_rewards(
+        rewards, kl, kl_rewards = rlhf.get_rewards_ppo(
             scores, logprobs, ref_logprobs, kl_controller_value
         )
 
@@ -182,7 +182,7 @@ class TestEstimateAdvantages:
             ]
         )
 
-        # see `torchtune.utils.ppo_utils.estimate_advantages`
+        # see `torchtune.modules.rlhf.estimate_advantages`
         expected_advantages = returns - values
         expected_whitened_advantages = rlhf.whiten(expected_advantages, shift_mean=True)
         advantages, _ = rlhf.estimate_advantages(values, rewards, gamma, lmbda)

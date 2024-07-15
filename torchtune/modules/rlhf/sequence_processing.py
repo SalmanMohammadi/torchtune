@@ -14,17 +14,16 @@ def truncate_sequence_at_first_stop_token(
     sequences: torch.Tensor, stop_tokens: torch.Tensor, fill_value: int = 0
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Truncates sequence(s) after the first stop token and fills with `fill_value`.
+    Truncates sequence(s) after the first stop token and pads with ``fill_value``.
+
     Args:
-        sequences (torch.Tensor): tensor of shape [batch_size, sequence_length] or [sequence_length]
-        stop_tokens (torch.Tensor): tensor containing stop tokens
-        fill_value (int): value to fill the sequence with after the first stop token, usually padding ID
+        sequences (torch.Tensor): tensor of shape [batch_size, sequence_length] or [sequence_length].
+        stop_tokens (torch.Tensor): tensor containing stop tokens.
+        fill_value (int): value to pad the sequence with after the first stop token, usually ``pad_id``.
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: tuple of two tensors:
-            - padding_mask (torch.Tensor): tensor with the same shape as `sequences`
-                where True indicates the corresponding token has been filled with `fill_value`.
-            - sequences (torch.Tensor): tensor with the same shape as `sequences`
-                with each sequence truncated at the first stop token and filled with `fill_value`
+        Tuple[torch.Tensor, torch.Tensor]: A tuple of two tensors with the same shape as ``sequences``:
+            - padding_mask (torch.Tensor): a bool tensor where True indicates the token has been truncated.
+            - sequences (torch.Tensor) a tensor of truncated and padded sequences.
     """
     eos_mask = torch.isin(sequences, stop_tokens)
     seq_lens = torch.cumsum(eos_mask, dim=1)
@@ -38,12 +37,13 @@ def logits_to_logprobs(
 ) -> torch.Tensor:
     """
     Converts logits corresponding to a generated sequence to logprobs over the generated tokens.
+
     Args:
         logits (torch.Tensor): The logits tensor of shape [b, response_length, vocab_size].
         sequences (torch.Tensor): The responses tensor of shape [b, response_length].
         temperature (float): The temperature to scale the logits. Default 1.0
     Returns:
-        torch.Tensor: The log probabilities corresponding to each token in `sequences`. Shape [b, response_length].
+        torch.Tensor: The log probabilities corresponding to each token in ``sequences``. Shape [b, response_length].
     """
     return torch.gather(
         F.log_softmax(logits / temperature, dim=-1),
@@ -57,6 +57,7 @@ def query_response_logits_to_response_logits(
 ) -> torch.Tensor:
     """
     Converts logits estimated over a query-generated-response pair logits to logits for the response.
+
     See the excalidraw linked in TRL's PPOV2 for a visual explanation
         https://github.com/huggingface/trl/blob/747612f9d3063de56b6524e5feb0c9feab21d4c4/trl/trainer/ppov2_trainer.py#L358
     Args:

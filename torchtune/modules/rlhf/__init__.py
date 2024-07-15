@@ -9,11 +9,11 @@ from ._generation import (
     generate_with_logits,
     get_causal_mask,
 )
-from .collate import left_padded_collate
+from .collate import left_padded_collate, padded_collate_dpo
 from .rewards import (
     estimate_advantages,
     get_reward_penalty_mask,
-    get_rewards,
+    get_rewards_ppo,
     masked_mean,
     masked_var,
     masked_whiten,
@@ -33,10 +33,10 @@ __all__ = [
     "logits_to_logprobs",
     "query_response_logits_to_response_logits",
     "get_reward_penalty_mask",
-    "update_stop_tokens_tracker",
     "left_padded_collate",
+    "padded_collate_dpo",
     "estimate_advantages",
-    "get_rewards",
+    "get_rewards_ppo",
     "whiten",
     "masked_whiten",
     "masked_mean",
