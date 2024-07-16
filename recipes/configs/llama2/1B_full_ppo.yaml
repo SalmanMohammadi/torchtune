@@ -137,7 +137,7 @@ dtype: bf16
 # batch size for forward pass during generation
 forward_batch_size: 32
 max_generated_tokens: 58
-temperature: 1.0
+temperature: 0.7
 top_k: null
 
 # Reward args

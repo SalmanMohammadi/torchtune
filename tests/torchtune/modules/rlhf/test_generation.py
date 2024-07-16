@@ -55,7 +55,6 @@ class TestGenerateNextTokenWithLogits:
         expected_logits = generation_model(inputs, input_pos=input_pos)
         expected_generation = sample(logits[:, -1], temperature=1.0, top_k=None)
 
-        print(logits.shape, expected_logits.shape)
         torch.testing.assert_close(logits, expected_logits, atol=1e-4, rtol=1e-5)
         torch.testing.assert_close(generation, expected_generation, atol=0, rtol=0)
 
