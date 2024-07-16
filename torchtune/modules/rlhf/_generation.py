@@ -68,7 +68,7 @@ def generate_next_token_with_logits(
             - logits (torch.Tensor): tensor with the logits associated with the generated tokens,
                 with shape [bsz x seq_length x vocab_size].
             - tokens (torch.Tensor): tensor with the generated tokens,
-                with shape [bsz x seq_length].
+                with shape [bsz x 1].
 
     """
     # model produces logits in [bsz, seq_length, vocab_size]
