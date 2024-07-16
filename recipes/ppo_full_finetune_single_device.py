@@ -50,6 +50,77 @@ Trajectory = NamedTuple(
 
 
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
+    """
+    Full finetuning recipe for RLHF with PPO for dense transformer-based LLMs such as LLama2. This recipe is optimized
+    for single GPU training. Training on CPU is not supported.
+
+    Features:
+        - Activation Checkpointing. This can be controlled using the ``activation_checkpointing``
+            flag. Activation checkpointing helps reduce the memory footprint since we no longer keep
+            activations in memory and instead recompute them during the backward pass. This is especially
+            helpful for larger batch sizes when you're memory constrained. But these savings in memory
+            come at the cost of training performance. In most cases training can slow-down quite a bit as
+            a result of this activation recomputation.
+
+        - Precision. Full fp32 and bf16 training are supported. Precision is controlled using the ``dtype``
+            flag. When ``dtype=bf16``, all activations, gradients and optimizer states are in bfloat16. In
+            most cases this should halve the memory footprint of full precision (fp32) training, without
+            loss in model quality (will depend on the model, training data and other settings). For
+            GPUs which do not support bfloat16, we fall back to fp32. Mixed precision training and fp16
+            precision are currently not supported.
+
+        - Adjusting batch sizes when memory constrained. This recipe uses three different batch sizes:
+            - ``batch_size`` controls the total number of samples which are sampled from the dataset for a single trajectory.
+            - ``forward_batch_size`` controls the mini-batch size for trajectory generation. Since gradients are disabled
+                during trajectory generation, memory consumption is lower and this can be higher than ``ppo_batch_size``.
+            - ``ppo_batch_size`` controls the number of samples used for a single optimization step during PPO optimization.
+                Since we're optimizing two models at once, adjusting this parameter can have a big impact during training.
+
+        - Gradient Accumulation. You can simulate larger ``ppo_batch_size`` sizes by accumulating gradients. This is
+            controlled using the ``gradient_accumulation_steps`` flag.
+
+            For example: with ``ppo_batch_size``=32 and ``gradient_accumulation_steps``=16, each backward pass during
+            PPO optmization uses a 'micro batch size' of 2.
+
+            Gradient accumulation is especially useful when you are memory constrained. In this case,
+            accumulating gradients might give you better training speed than enabling activation
+            checkpointing.
+
+        - Optimizer in Backward. Fusing the optimizer step into the backward pass helps reduce the memory
+            footprint associated with gradients. This can be especially helpful when you are memory
+            constrained. Note that users can only use ONE of gradient accumulation or optimizer in backward.
+            These features currently do not work together. For more details on optimizer in backward, please
+            see this tutorial: https://pytorch.org/tutorials/intermediate/optimizer_step_in_backward_tutorial.html
+
+            This paramater can provide significant performance gains, since there the number of optimization steps
+            scales with ``ppo_epochs`` and ``batch_size``. Depending on the maximum sequence length sampled from the dataset,
+            we've found that setting ``ppo_batch_size`` to the highest you can fit in memory, and `optimizer_in_bwd=True` to
+            provide significant speedups and memory savings.
+
+        - Lower precision optimizers. This recipe supports lower-precision optimizers from the bitsandbytes
+            library (https://huggingface.co/docs/bitsandbytes/main/en/index). We've tested the recipe with
+            8-bit AdamW and Paged AdamW. These optimizers are especially helpful when you are memory constrained
+            since they help reduce the memory footprint associated with the optimizer states.
+
+        - Checkpointing. Model weights are checkpointed both at the end of each epoch, and at the end of
+            training. Optimizer State and recipe state (seed, total_epochs, number of epochs run etc) are
+            only saved at the end of a given epoch and used in case of resuming training.
+
+            Resuming training is controlled by the ``resume_from_checkpoint`` flag. Mid-epoch checkpointing is
+            currently not supported.
+
+            For more details on the checkpointer, please take a look at
+            our checkpointer deepdive (https://pytorch.org/torchtune/main/deep_dives/checkpointer.html).
+
+        - Logging. Terminal, Disk, WandB and TensorBoard are all supported.
+
+    Args:
+        cfg (DictConfig): OmegaConf object parsed from yaml file
+
+    Raises:
+        RuntimeError: If ``dtype`` is set to fp16.
+    """
+
     def __init__(self, cfg: DictConfig) -> None:
 
         self._device = utils.get_device(device=cfg.device)
@@ -390,61 +461,60 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         if reward_unexpected or value_unexpected:
             # the only unexpected keys should be when pre-trained HF models were saved with
-            # bias=True in final classification layers.
+            # bias=True in final classification layers. This happens when training a reward model with TRL.
             assert (
                 reward_unexpected == value_unexpected == ["output.bias"]
             ), f"Unexpected keys in reward ({reward_unexpected}) and value model ({value_unexpected}) state dicts."
 
-        # Validate model was loaded in with the expected dtype.
+        # Validate models were loaded in with the expected dtype.
         utils.validate_expected_param_dtype(
             value_model.named_parameters(), dtype=self._dtype
         )
-        log.info(f"Base model is initialized with precision {self._dtype}.")
-
         utils.validate_expected_param_dtype(
             reward_model.named_parameters(), dtype=self._dtype
         )
-        log.info(f"Reward model is initialized with precision {self._dtype}.")
-
         utils.validate_expected_param_dtype(
             value_model.named_parameters(), dtype=self._dtype
         )
-        log.info(f"Value model is initialized with precision {self._dtype}.")
-
         utils.validate_expected_param_dtype(
             ref_policy_model.named_parameters(), dtype=self._dtype
         )
-        log.info(f"Ref model is initialized with precision {self._dtype}.")
 
-        for model in [policy_model, value_model]:
-            # disabling dropout if found - non-determinism leads to issues in e.g. comparing logprobs
-            # between ref policy and current policy
-            for module in model.modules():
-                if isinstance(module, torch.nn.Dropout):
-                    warn(
-                        f"Dropout found in {module}. This is likely to cause issues during training. Disabling."
-                    )
-                    module.p = 0
+        log.info(f"Models are initialized with precision {self._dtype}.")
 
-        for model in [reward_model, ref_policy_model]:
-            model.eval()
-            for p in model.parameters():
-                p.requires_grad = False
+        # disabling dropout if found - non-determinism leads to issues in e.g. comparing logprobs
+        # between ref policy and current policy
+        for module in policy_model.modules():
+            if isinstance(module, torch.nn.Dropout):
+                warn(
+                    f"Dropout found in {module}. This is likely to cause issues during training. Disabling."
+                )
+                module.p = 0
+        for module in value_model.modules():
+            if isinstance(module, torch.nn.Dropout):
+                warn(
+                    f"Dropout found in {module}. This is likely to cause issues during training. Disabling."
+                )
+                module.p = 0
+
+        # disabling grad and dropout in reward and reference policy models
+        reward_model.eval()
+        ref_policy_model.eval()
+
+        for p in reward_model.parameters():
+            p.requires_grad = False
+
+        for p in ref_policy_model.parameters():
+            p.requires_grad = False
 
         # Compile model, if enabled.
         if compile_model:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
-            backend = "aot_eager"  # TODO (SalmanMohammadi)
-            log.info("Compiling policy model with torch.compile...")
+            log.info("Compiling models torch.compile...")
+
             policy_model.compile(backend=backend)
-
-            log.info("Compiling reward model with torch.compile...")
             reward_model.compile(backend=backend)
-
-            log.info("Compiling ref model with torch.compile...")
             ref_policy_model.compile(backend=backend)
-
-            log.info("Compiling value model with torch.compile...")
             value_model.compile(backend=backend)
 
         if self._device.type == "cuda":
@@ -468,7 +538,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     self._policy_model.parameters(), self._value_model.parameters()
                 )
             }
-            # Register optimizer step hooks on the model to run optimizer in backward.
+            # Register optimizer step hooks on the models to run optimizer in backward.
             utils.register_optim_in_bwd_hooks(
                 model=self._policy_model, optim_dict=optim_dict
             )
@@ -476,21 +546,23 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 model=self._value_model, optim_dict=optim_dict
             )
             # Create a wrapper for checkpoint save/load of optimizer states when running in backward.
-            # self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(model=self._model, optim_dict=optim_dict)
-            # self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
-            #     model=self._value_model, optim_dict=optim_dict
-            # )
-            # # Load optimizer states. If optimizer states are being restored in an optimizer in backward
-            # # run, these need to have been saved with the same setting. Cannot restore from runs that did not
-            # # use optimizer in backward.
-            # if opt_state_dict is not None:
-            #     try:
-            #         self._optim_ckpt_wrapper.load_state_dict(opt_state_dict)
-            #     except BaseException as e:
-            #         raise RuntimeError(
-            #             "Failed loading in-backward optimizer checkpoints."
-            #             "Please make sure run being restored from was using in-backward optimizer."
-            #         ) from e
+            self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
+                model=self._policy_model, optim_dict=optim_dict
+            )
+            self._optim_ckpt_wrapper = utils.create_optim_in_bwd_wrapper(
+                model=self._value_model, optim_dict=optim_dict
+            )
+            # Load optimizer states. If optimizer states are being restored in an optimizer in backward
+            # run, these need to have been saved with the same setting. Cannot restore from runs that did not
+            # use optimizer in backward.
+            if opt_state_dict is not None:
+                try:
+                    self._optim_ckpt_wrapper.load_state_dict(opt_state_dict)
+                except BaseException as e:
+                    raise RuntimeError(
+                        "Failed loading in-backward optimizer checkpoints."
+                        "Please make sure run being restored from was using in-backward optimizer."
+                    ) from e
             log.info("In-backward optimizers are set up.")
             return None
         else:
@@ -889,11 +961,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
             # save checkpoint at current epoch
             self._epochs_run += 1
+
             self.save_checkpoint(
                 curr_epoch, is_intermediate_checkpoint=not training_completed
             )
             if training_completed:
-                break
+                return
 
     def _ppo_step(
         self,

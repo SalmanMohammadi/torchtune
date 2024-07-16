@@ -61,14 +61,18 @@ def dummy_alpaca_dataset_config():
     return out
 
 
-def dummy_text_completion_dataset_config():
+def dummy_text_completion_alpaca_dataset_config():
+    """
+    Constructs a minimal text-completion-style dataset from ``alpaca_tiny.json``.
+    This is used for testing PPO fine-tuning.
+    """
     data_files = os.path.join(get_assets_path(), "alpaca_tiny.json")
     out = [
         "dataset._component_=torchtune.datasets.text_completion_dataset",
         "dataset.source='json'",
         f"dataset.data_files={data_files}",
         "dataset.column='instruction'",
-        "dataset.split='train'",
+        "dataset.split='train[:10%]'",  # 10% of the dataset gets us 8 batches
         "dataset.max_seq_len=64",
         "dataset.add_eos=False",
     ]
