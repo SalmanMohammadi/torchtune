@@ -9,6 +9,7 @@
 #   tune download TinyLlama/TinyLlama_v1.1 --hf-token <HF_TOKEN> --output-dir /tmp/TinyLlama_v1.1
 #   tune download smohammadi/tinyllama_rm_sentiment_1b  --hf-token <HF_TOKEN> --output-dir /tmp/tinyllama_rm_sentiment_1b --ignore-patterns ""
 #
+# You'll also need to ensure that {output_dir} exists beforehand, as checkpoints for policy and value models are saved in sub-folders.
 # To launch on a single device, run the following command from root:
 #   tune run ppo_full_finetune_single_device --config llama2/1B_full_ppo_single_device
 #
@@ -22,7 +23,7 @@
 # Tokenizer
 tokenizer:
   _component_: torchtune.models.llama2.llama2_tokenizer
-  path:  ./target/dummy/tokenizer.model
+  path:  /tmp/TinyLlama_v1.1/tokenizer.model
 
 # Dataset
 dataset:
