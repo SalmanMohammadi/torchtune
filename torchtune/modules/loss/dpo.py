@@ -21,7 +21,10 @@ class DPOLoss(nn.Module):
     Args:
         beta (float): Temperature parameter for the DPO loss, typically in the range of 0.1 to 0.5. Default is 0.1.
         label_smoothing (float): Parameter encoding uncertainty about the labels. Default is 0.
-        loss_type (str): Type of loss function to be used. Should be one of ['sigmoid', 'hinge', 'ipo', 'kto_pair'].
+        loss_type (str): Type of loss function to be used. Should be one of 'sigmoid', 'hinge', 'ipo', or 'kto_pair'.
+
+    Raises:
+        ValueError: If ``loss_type`` is not one of 'sigmoid', 'hinge', 'ipo', or 'kto_pair'.
     """
 
     def __init__(
@@ -33,6 +36,11 @@ class DPOLoss(nn.Module):
         super(DPOLoss, self).__init__()
         self.beta = beta
         self.label_smoothing = label_smoothing
+        if loss_type not in ["sigmoid", "hinge", "ipo", "kto_pair"]:
+            raise ValueError(
+                "Only 'sigmoid', 'hinge', 'ipo', or 'kto_pair' are supported for ``loss_type ``"
+                f"but {loss_type} was passed in."
+            )
         self.loss_type = loss_type
 
     def forward(
@@ -61,8 +69,6 @@ class DPOLoss(nn.Module):
                 - chosen_rewards: Rewards for the chosen responses.
                 - rejected_rewards: Rewards for the rejected responses.
 
-        Raises:
-            ValueError: If an unknown loss type is specified.
         """
         pi_logratios = policy_chosen_logps - policy_rejected_logps
         ref_logratios = reference_chosen_logps - reference_rejected_logps
@@ -98,10 +104,6 @@ class DPOLoss(nn.Module):
                     1 - F.sigmoid(self.beta * (chosen_kl - rejected_logratios)),
                 ),
                 0,
-            )
-        else:
-            raise ValueError(
-                f"Unknown loss type: {self.loss_type}. Should be one of ['sigmoid', 'hinge', 'ipo', 'kto_pair']"
             )
 
         chosen_rewards = (
