@@ -14,6 +14,9 @@ import torch.nn.functional as F
 class DPOLoss(nn.Module):
     """
     Direct Preference Optimization (DPO) Loss module: https://arxiv.org/abs/2305.18290.
+    Simply stated from the paper:
+        > Intuitively, the gradient of the loss function increases the likelihood
+        of the preferred completions and decreases the likelihood of dispreferred completions.
 
     Based on the implementation in HF's TRL library:
     https://github.com/huggingface/trl/blob/5d1deb1445828cfd0e947cb3a7925b1c03a283fc/trl/trainer/dpo_trainer.py#L844
@@ -21,27 +24,16 @@ class DPOLoss(nn.Module):
     Args:
         beta (float): Temperature parameter for the DPO loss, typically in the range of 0.1 to 0.5. Default is 0.1.
         label_smoothing (float): Parameter encoding uncertainty about the labels. Default is 0.
-        loss_type (str): Type of loss function to be used. Should be one of 'sigmoid', 'hinge', 'ipo', or 'kto_pair'.
-
-    Raises:
-        ValueError: If ``loss_type`` is not one of 'sigmoid', 'hinge', 'ipo', or 'kto_pair'.
     """
 
     def __init__(
         self,
         beta: float = 0.1,
         label_smoothing: float = 0.0,
-        loss_type: str = "sigmoid",
     ):
-        super(DPOLoss, self).__init__()
+        super().__init__()
         self.beta = beta
         self.label_smoothing = label_smoothing
-        if loss_type not in ["sigmoid", "hinge", "ipo", "kto_pair"]:
-            raise ValueError(
-                "Only 'sigmoid', 'hinge', 'ipo', or 'kto_pair' are supported for ``loss_type ``"
-                f"but {loss_type} was passed in."
-            )
-        self.loss_type = loss_type
 
     def forward(
         self,
@@ -78,39 +70,152 @@ class DPOLoss(nn.Module):
         # The beta is a temperature parameter for the DPO loss, typically something in the range of 0.1 to 0.5.
         # We ignore the reference model as beta -> 0. The label_smoothing parameter encodes our uncertainty about the labels and
         # calculates a conservative DPO loss.
-        if self.loss_type == "sigmoid":
-            losses = (
-                -F.logsigmoid(self.beta * logits) * (1 - self.label_smoothing)
-                - F.logsigmoid(-self.beta * logits) * self.label_smoothing
-            )
-        elif self.loss_type == "hinge":
-            losses = torch.relu(1 - self.beta * logits)
-        elif self.loss_type == "ipo":
-            losses = (logits - 1 / (2 * self.beta)) ** 2
-        elif self.loss_type == "kto_pair":
-            chosen_kl = (
-                (policy_chosen_logps - reference_chosen_logps).mean().clamp(min=0)
-            )
-            rejected_kl = (
-                (policy_rejected_logps - reference_rejected_logps).mean().clamp(min=0)
-            )
-
-            chosen_logratios = policy_chosen_logps - reference_chosen_logps
-            rejected_logratios = policy_rejected_logps - reference_rejected_logps
-
-            losses = torch.cat(
-                (
-                    1 - F.sigmoid(self.beta * (chosen_logratios - rejected_kl)),
-                    1 - F.sigmoid(self.beta * (chosen_kl - rejected_logratios)),
-                ),
-                0,
-            )
+        losses = (
+            -F.logsigmoid(self.beta * logits) * (1 - self.label_smoothing)
+            - F.logsigmoid(-self.beta * logits) * self.label_smoothing
+        )
 
         chosen_rewards = (
             self.beta * (policy_chosen_logps - reference_chosen_logps).detach()
         )
         rejected_rewards = (
             self.beta * (policy_rejected_logps - reference_rejected_logps).detach()
+        )
+
+        return losses, chosen_rewards, rejected_rewards
+
+
+class RSOLoss(nn.Module):
+    """
+    Statistical Rejection Sampling Optimization (RSO) or "hinge" loss module: https://arxiv.org/abs/2309.06657.
+    Intuition from the paper:
+        > DPO is a logistic regression on human preference data, and SLiC (https://arxiv.org/abs/2305.10425) is almost
+        equivalent to a support vector machine (SVM) with hinge loss. [RSO] improve[s] SLiC as the SVM counter part of DPO.
+
+    Based on the implementation in HF's TRL library:
+    https://github.com/huggingface/trl/blob/4dce042a3863db1d375358e8c8092b874b02934b/trl/trainer/dpo_trainer.py#L1141
+    Args:
+        gamma (float): Equivalent temperature parameter (from DPO) for the RSO loss.
+    """
+
+    def __init__(
+        self,
+        gamma: float = 0.1,
+    ):
+        super().__init__()
+        self.gamma = gamma
+
+    def forward(
+        self,
+        policy_chosen_logps: torch.Tensor,
+        policy_rejected_logps: torch.Tensor,
+        reference_chosen_logps: torch.Tensor,
+        reference_rejected_logps: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute the RSO loss for a batch of policy and reference model log probabilities.
+
+        Args:
+            policy_chosen_logps (torch.Tensor): Log probabilities of the policy model
+                for the chosen responses. Shape: (batch_size)
+            policy_rejected_logps (torch.Tensor): Log probabilities of the policy model
+                for the rejected responses. Shape: (batch_size)
+            reference_chosen_logps (torch.Tensor): Log probabilities of the reference model
+                for the chosen responses. Shape: (batch_size)
+            reference_rejected_logps (torch.Tensor): Log probabilities of the reference model
+                for the rejected responses. Shape: (batch_size)
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple of three tensors:
+                - losses: The RSO loss for each example in the batch.
+                - chosen_rewards: Rewards for the chosen responses.
+                - rejected_rewards: Rewards for the rejected responses.
+
+        """
+        pi_logratios = policy_chosen_logps - policy_rejected_logps
+        ref_logratios = reference_chosen_logps - reference_rejected_logps
+
+        logits = pi_logratios - ref_logratios
+
+        losses = torch.relu(1 - self.gamma * logits)
+
+        chosen_rewards = (
+            self.gamma * (policy_chosen_logps - reference_chosen_logps).detach()
+        )
+        rejected_rewards = (
+            self.gamma * (policy_rejected_logps - reference_rejected_logps).detach()
+        )
+
+        return losses, chosen_rewards, rejected_rewards
+
+
+class IPOLoss(nn.Module):
+    """
+    Identity Preference Optimisation (IPO) Loss module: https://arxiv.org/abs/2310.12036
+    Intuition from the paper:
+        > PO learns from preferences dataset simply by regressing the gap between log-likelihood ratios
+            log(π(chosen)/π(rejected)) and log(π_ref(chosen)/πref(rejected))
+        to 1/(2*tau), where tau is the temperature parameter. [T]he weaker the regularisation becomes, the
+        higher would be the log-likelihood ratio of chosen to rejected logprobs. In other words IPO, unlike DPO,
+        always regularizes its solution towards π_ref by controlling the gap between the log-likelihood ratios
+            log(π(chosen)/π(rejected)) and log(π_ref(chosen)/πref(rejected))
+        thus avoiding the over-fitting to the preference dataset.
+
+    Based on the implementation in HF's TRL library:
+    https://github.com/huggingface/trl/blob/4dce042a3863db1d375358e8c8092b874b02934b/trl/trainer/dpo_trainer.py#L1143
+
+    Args:
+        tau (float): Equivalent temperature scaling parameter (from DPO) for the IPO loss. From the TRL documentation:
+            > the [tau] parameter is the reciprocal of the gap between the log-likelihood ratios of the
+            chosen vs the rejected completion pair and thus the smaller the tau the larger this gap is.
+    """
+
+    def __init__(
+        self,
+        tau: float = 0.1,
+    ):
+        super().__init__()
+        self.tau = tau
+
+    def forward(
+        self,
+        policy_chosen_logps: torch.Tensor,
+        policy_rejected_logps: torch.Tensor,
+        reference_chosen_logps: torch.Tensor,
+        reference_rejected_logps: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute the DPO loss for a batch of policy and reference model log probabilities.
+
+        Args:
+            policy_chosen_logps (torch.Tensor): Log probabilities of the policy model
+                for the chosen responses. Shape: (batch_size)
+            policy_rejected_logps (torch.Tensor): Log probabilities of the policy model
+                for the rejected responses. Shape: (batch_size)
+            reference_chosen_logps (torch.Tensor): Log probabilities of the reference model
+                for the chosen responses. Shape: (batch_size)
+            reference_rejected_logps (torch.Tensor): Log probabilities of the reference model
+                for the rejected responses. Shape: (batch_size)
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple of three tensors:
+                - losses: The DPO loss for each example in the batch.
+                - chosen_rewards: Rewards for the chosen responses.
+                - rejected_rewards: Rewards for the rejected responses.
+
+        """
+        pi_logratios = policy_chosen_logps - policy_rejected_logps
+        ref_logratios = reference_chosen_logps - reference_rejected_logps
+
+        logits = pi_logratios - ref_logratios
+
+        losses = (logits - 1 / (2 * self.tau)) ** 2
+
+        chosen_rewards = (
+            self.tau * (policy_chosen_logps - reference_chosen_logps).detach()
+        )
+        rejected_rewards = (
+            self.tau * (policy_rejected_logps - reference_rejected_logps).detach()
         )
 
         return losses, chosen_rewards, rejected_rewards
