@@ -15,8 +15,10 @@ class DPOLoss(nn.Module):
     """
     Direct Preference Optimization (DPO) Loss module: https://arxiv.org/abs/2305.18290.
     Simply stated from the paper:
-        > Intuitively, the gradient of the loss function increases the likelihood
-        of the preferred completions and decreases the likelihood of dispreferred completions.
+
+        Intuitively, the DPO update increases the relative log probability of preferred to dispreferred responses,
+        but it incorporates a dynamic, per-example importance weight that prevents
+        the model degeneration that we find occurs with a naive probability ratio objective.
 
     Based on the implementation in HF's TRL library:
     https://github.com/huggingface/trl/blob/5d1deb1445828cfd0e947cb3a7925b1c03a283fc/trl/trainer/dpo_trainer.py#L844
@@ -89,11 +91,13 @@ class RSOLoss(nn.Module):
     """
     Statistical Rejection Sampling Optimization (RSO) or "hinge" loss module: https://arxiv.org/abs/2309.06657.
     Intuition from the paper:
-        > DPO is a logistic regression on human preference data, and SLiC (https://arxiv.org/abs/2305.10425) is almost
+
+        DPO is a logistic regression on human preference data, and SLiC (https://arxiv.org/abs/2305.10425) is almost
         equivalent to a support vector machine (SVM) with hinge loss. [RSO] improve[s] SLiC as the SVM counter part of DPO.
 
     Based on the implementation in HF's TRL library:
     https://github.com/huggingface/trl/blob/4dce042a3863db1d375358e8c8092b874b02934b/trl/trainer/dpo_trainer.py#L1141
+
     Args:
         gamma (float): Equivalent temperature parameter (from DPO) for the RSO loss.
     """
@@ -151,14 +155,21 @@ class RSOLoss(nn.Module):
 
 class IPOLoss(nn.Module):
     """
-    Identity Preference Optimisation (IPO) Loss module: https://arxiv.org/abs/2310.12036
+    Identity Preference Optimisation (IPO) Loss module: https://arxiv.org/abs/2310.12036.
     Intuition from the paper:
-        > PO learns from preferences dataset simply by regressing the gap between log-likelihood ratios
-            log(π(chosen)/π(rejected)) and log(π_ref(chosen)/πref(rejected))
+
+        (Given a policy pi and reference policy, pi_ref)
+
+        IPO learns from preferences dataset simply by regressing the gap between log-likelihood ratios
+
+        log(pi(chosen)/pi(rejected)) and log(pi_ref(chosen)/pi_ref(rejected))
+
         to 1/(2*tau), where tau is the temperature parameter. [T]he weaker the regularisation becomes, the
         higher would be the log-likelihood ratio of chosen to rejected logprobs. In other words IPO, unlike DPO,
-        always regularizes its solution towards π_ref by controlling the gap between the log-likelihood ratios
-            log(π(chosen)/π(rejected)) and log(π_ref(chosen)/πref(rejected))
+        always regularizes its solution towards pi_ref by controlling the gap between the log-likelihood ratios
+
+        log(pi(chosen)/pi(rejected)) and log(pi_ref(chosen)/pi_ref(rejected))
+
         thus avoiding the over-fitting to the preference dataset.
 
     Based on the implementation in HF's TRL library:
@@ -166,7 +177,8 @@ class IPOLoss(nn.Module):
 
     Args:
         tau (float): Equivalent temperature scaling parameter (from DPO) for the IPO loss. From the TRL documentation:
-            > the [tau] parameter is the reciprocal of the gap between the log-likelihood ratios of the
+
+            the [tau] parameter is the reciprocal of the gap between the log-likelihood ratios of the
             chosen vs the rejected completion pair and thus the smaller the tau the larger this gap is.
     """
 
