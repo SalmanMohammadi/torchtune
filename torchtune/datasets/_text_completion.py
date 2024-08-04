@@ -75,7 +75,7 @@ class TextCompletionDataset(Dataset):
 def text_completion_dataset(
     tokenizer: ModelTokenizer,
     source: str,
-    column: Optional[str] = None,
+    column: str = "text",
     max_seq_len: Optional[int] = None,
     add_eos: bool = True,
     packed: bool = False,
@@ -91,8 +91,8 @@ def text_completion_dataset(
         tokenizer (ModelTokenizer): Tokenizer used by the model that implements the ``tokenize_messages`` method.
         source (str): path string of dataset, anything supported by Hugging Face's ``load_dataset``
             (https://huggingface.co/docs/datasets/en/package_reference/loading_methods#datasets.load_dataset.path)
-        column (Optional[str]): name of column in the sample that contains the text data. This is typically required
-            for Hugging Face datasets or tabular data, but can be omitted for local datasets. Default is None.
+        column (str): name of column in the sample that contains the text data. This is typically required
+            for Hugging Face datasets or tabular data. Default 'text'.
         max_seq_len (Optional[int]): Maximum number of tokens in the returned input and label token id lists.
             Default is None, disabling truncation. We recommend setting this to the highest you can fit in memory
             and is supported by the model. For example, llama2-7B supports up to 4096 for sequence length.
