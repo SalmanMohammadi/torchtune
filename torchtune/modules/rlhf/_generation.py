@@ -10,17 +10,14 @@ import torch
 from torchtune.modules.transformer import TransformerDecoder
 
 
-def multinomial_sample_one(probs: torch.Tensor, rng: Optional[torch.Generator] = None) -> torch.Tensor:
+def multinomial_sample_one(probs: torch.Tensor, rng: Optional[torch.Generator] = None, q=None) -> torch.Tensor:
     """Samples from a multinomial distribution."""
-    q = torch.empty_like(probs).exponential_(1, generator=rng)
+    q = torch.empty_like(probs).exponential_(1, generator=rng) if q is None else q
     return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
 
 
 def sample(
-    logits: torch.Tensor,
-    temperature: float = 1.0,
-    top_k: int = None,
-    rng: Optional[torch.Generator] = None,
+    logits: torch.Tensor, temperature: float = 1.0, top_k: int = None, rng: Optional[torch.Generator] = None, q=None
 ) -> torch.Tensor:
     """Generic sample from a probability distribution."""
     # scale the logits based on temperature
@@ -34,7 +31,7 @@ def sample(
         logits = torch.where(logits < pivot, -float("Inf"), logits)
     # change logits into probabilities
     probs = torch.nn.functional.softmax(logits, dim=-1)
-    return multinomial_sample_one(probs, rng)
+    return multinomial_sample_one(probs, rng, q)
 
 
 def generate_next_token_with_logits(
@@ -46,6 +43,7 @@ def generate_next_token_with_logits(
     temperature: float = 1.0,
     top_k: Optional[int] = None,
     rng: Optional[torch.Generator] = None,
+    q=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Generates the next tokens given a prompt, and also returns the corresponding logits.
@@ -72,7 +70,7 @@ def generate_next_token_with_logits(
     # model produces logits in [bsz, seq_length, vocab_size]
     # we want to take the last token's logits as the input to the next model call
     logits = model(x, input_pos=input_pos, mask=mask)
-    return logits, sample(logits[:, -1].clone(), temperature, top_k, rng)
+    return logits, sample(logits[:, -1].clone(), temperature, top_k, rng, q)
 
 
 def get_causal_mask(
@@ -182,7 +180,7 @@ def generate_with_logits(
         if masks is not None:
             model.causal_mask = None
             curr_masks = masks[:, :prompt_length]
-        curr_pos = input_pos[:, :prompt_length].squeeze()
+        curr_pos = input_pos[:, :prompt_length]
     else:
         if masks is not None:
             curr_masks = masks[:, :prompt_length, :prompt_length]
@@ -193,13 +191,10 @@ def generate_with_logits(
 
     # pdb.set_trace()
     # lets grab the first tokens
+    q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(1, generator=rng)
+
     _, tokens = generate_next_token_with_logits(
-        model,
-        input_pos=curr_pos,
-        mask=curr_masks,
-        x=prompt,
-        temperature=temperature,
-        top_k=top_k,
+        model, input_pos=curr_pos, mask=curr_masks, x=prompt, temperature=temperature, top_k=top_k, q=q
     )
 
     generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
@@ -227,14 +222,18 @@ def generate_with_logits(
                 curr_masks = masks[:, : curr_pos + 1, : curr_pos + 1]
 
         # pdb.set_trace()
+        q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(
+            1, generator=rng
+        )
         logits, tokens = custom_generate_next_token_with_logits(
             model,
             input_pos=curr_input_pos.unsqueeze(-1),
-            x=tokens,
+            x=tokens.clone(),
             mask=curr_masks,
             temperature=temperature,
             top_k=top_k,
-            rng=rng,
+            rng=None,
+            q=q,
         )
         generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
         curr_pos += 1

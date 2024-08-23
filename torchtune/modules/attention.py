@@ -256,8 +256,8 @@ class MultiHeadAttention(nn.Module):
             k, v = self.kv_cache.update(input_pos, k, v)
 
         # shape: [b, 1, s, s]
-        if mask is not None:
-            mask = mask[:, None, :, :]
+        # if mask is not None:
+        #     # mask = mask[None, :, :]
 
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
         import pdb

@@ -57,9 +57,7 @@ class KVCache(nn.Module):
         Returns:
             Tuple[Tensor, Tensor]: Updated KV cache with key first
         """
-        import pdb
 
-        # pdb.set_trace()
         assert input_pos.shape[-1] == k_val.shape[2]
         self.size = input_pos.dim()
 

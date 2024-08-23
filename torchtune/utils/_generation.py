@@ -114,10 +114,8 @@ def generate(
 
     # generate the first tokens conditioned on the prompt
     input_pos = torch.arange(0, model.max_seq_len, device=prompt.device)
-    state = torch.get_rng_state()
-    rng = torch.Generator()
-    rng.set_state(state)
-    q = torch.empty((bsz, model.tok_embeddings.num_embeddings)).exponential_(1, generator=rng).to(prompt.device)
+    rng = torch.Generator(prompt.device)
+    q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(1, generator=rng)
     tokens = generate_next_token(
         model, input_pos=input_pos[:prompt_length], x=prompt, temperature=temperature, top_k=top_k, q=q
     )

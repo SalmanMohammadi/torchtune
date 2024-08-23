@@ -38,7 +38,7 @@ Ut non commodo nisi. Nulla dapibus porta velit facilisis gravida. Phasellus inte
 
 # prompt = "The quick brown fox jumped over the lazy dog and went to"
 
-batch_size = 2
+batch_size = 1
 max_generated_tokens = 256
 with device:
     model.setup_caches(batch_size=batch_size, dtype=dtype)
@@ -50,12 +50,18 @@ prompt = torch.tensor(tokenizer.encode(prompt, add_eos=False), dtype=torch.int, 
 # prompt[:2][: prompt.shape[-1] // 4] = tokenizer.pad_id
 
 # ['cudagraphs', 'inductor', 'onnxrt', 'openxla', 'tvm']
+import logging
+
+torch._logging.set_logs(dynamo=logging.WARNING, recompiles=True, graph_breaks=True, guards=False)
 
 
 def generate_with_compile():
+
+    rng = torch.Generator(prompt.device)
+    rng.manual_seed(42)
     custom_generate_next_token = torch.compile(utils.generate_next_token, fullgraph=True, backend="inductor")
     print("Warmup run!")
-    t0 = time.perf_counter()
+    t0_comp = time.perf_counter()
     utils.generate(
         model=model,
         prompt=prompt,
@@ -64,9 +70,10 @@ def generate_with_compile():
         top_k=None,
         stop_tokens=None,
         custom_generate_next_token=custom_generate_next_token,
+        rng=rng,
     )
-    t = time.perf_counter() - t0
-    print(f"Time for warmup: {t:.02f} sec")
+    t_comp = time.perf_counter() - t0_comp
+    print(f"Time for warmup: {t_comp:.02f} sec")
 
     t0 = time.perf_counter()
     outputs = utils.generate(
@@ -98,16 +105,48 @@ def generate():
 
 
 def generate_rlhf():
+    rng = torch.Generator(prompt.device)
+    rng.manual_seed(42)
     t0 = time.perf_counter()
     generated_tokens, _ = rlhf.generate_with_logits(
+        model=model, prompt=prompt, max_generated_tokens=max_generated_tokens, temperature=1.0, top_k=None, rng=rng
+    )
+    t = time.perf_counter() - t0
+    return generated_tokens.tolist(), t
+
+
+def generate_rlhf_with_compile():
+    rng = torch.Generator(prompt.device)
+    rng.manual_seed(42)
+    custom_generate_next_token = torch.compile(
+        rlhf.generate_next_token_with_logits, fullgraph=True, backend="inductor"
+    )
+    print("Warmup run!")
+    t0 = time.perf_counter()
+    rlhf.generate_with_logits(
+        model=model,
+        prompt=prompt,
+        max_generated_tokens=2,
+        temperature=1.0,
+        top_k=None,
+        custom_generate_next_token_with_logits=custom_generate_next_token,
+        rng=rng,
+    )
+    t = time.perf_counter() - t0
+    print(f"Time for warmup: {t:.02f} sec")
+
+    t0 = time.perf_counter()
+    outputs, _ = rlhf.generate_with_logits(
         model=model,
         prompt=prompt,
         max_generated_tokens=max_generated_tokens,
         temperature=1.0,
         top_k=None,
+        custom_generate_next_token_with_logits=custom_generate_next_token,
+        rng=rng,
     )
     t = time.perf_counter() - t0
-    return generated_tokens.tolist(), t
+    return outputs.tolist(), t
 
 
 with torch.no_grad():
@@ -116,6 +155,8 @@ with torch.no_grad():
             generated_tokens, t = generate_with_compile()
         elif sys.argv[1] == "rlhf":
             generated_tokens, t = generate_rlhf()
+        elif sys.argv[1] == "rlhf_compile":
+            generated_tokens, t = generate_rlhf_with_compile()
     else:
         generated_tokens, t = generate()
 
