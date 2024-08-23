@@ -151,8 +151,8 @@ def generate_with_logits(
         prompt_masks = get_causal_mask(~padding_masks)
         masks = torch.tril(
             torch.ones(
-                model.max_seq_len,
-                model.max_seq_len,
+                prompt_length + max_generated_tokens,
+                prompt_length + max_generated_tokens,
                 dtype=torch.bool,
                 device=prompt.device,
             ).repeat(bsz, 1, 1)
@@ -160,7 +160,7 @@ def generate_with_logits(
         masks[:, :prompt_length, :prompt_length] = prompt_masks
         masks[:, prompt_length:, :prompt_length] = prompt_masks[:, -1:, :]
 
-        input_pos = (~padding_masks).cumsum(-1) - (~padding_masks).long()
+        input_pos = (~padding_masks).cumsum(-1) - (~padding_masks).int()
         input_pos = input_pos.to(torch.int)
         start_positions = input_pos.max(dim=-1, keepdim=False)[0]
         extended_input_pos = torch.stack(
@@ -169,19 +169,21 @@ def generate_with_logits(
                 for start_pos in start_positions
             ]
         )
-        input_pos = torch.hstack((input_pos, extended_input_pos))
+        input_pos = torch.hstack((input_pos, extended_input_pos)).contiguous()
     else:
         masks = None
         curr_masks = None
-        input_pos = torch.arange(0, prompt_length + max_generated_tokens, device=generated_tokens.device).view(1, -1)
+        input_pos = torch.arange(
+            0, prompt_length + max_generated_tokens + 1, device=generated_tokens.device
+        ).unsqueeze(0)
 
     incremental_decoding = model.caches_are_enabled()
 
     if incremental_decoding:
         if masks is not None:
             model.causal_mask = None
-            curr_masks = masks[:, :prompt_length]
-        curr_pos = input_pos[:, :prompt_length]
+            curr_masks = masks[:, :prompt_length, : input_pos[:, :prompt_length].max() + 1]
+        # curr_pos = input_pos[:, :prompt_length]
     else:
         if masks is not None:
             curr_masks = masks[:, :prompt_length, :prompt_length]
@@ -195,26 +197,37 @@ def generate_with_logits(
     q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(1, generator=rng)
 
     _, tokens = generate_next_token_with_logits(
-        model, input_pos=curr_pos, mask=curr_masks, x=prompt, temperature=temperature, top_k=top_k, q=q
+        model,
+        input_pos=input_pos[:, :prompt_length],
+        mask=curr_masks,
+        x=prompt,
+        temperature=temperature,
+        top_k=top_k,
+        q=q,
     )
 
     generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
 
     curr_pos = prompt_length
+    import pdb
 
+    # pdb.set_trace()
     for i in range(max_generated_tokens - 1):
         if incremental_decoding:
-            curr_input_pos = input_pos[:, curr_pos].contiguous()
+            curr_input_pos = input_pos[:, curr_pos]
             if curr_masks is not None:
                 # input_pos_expanded = curr_input_pos.unsqueeze(1).expand(-1, masks.shape[-1])
-                # import pdb
+                import pdb
 
                 # pdb.set_trace()
                 # # Use advanced indexing to select rows from the mask
                 # curr_masks = torch.gather(
                 #     masks, 1, curr_input_pos.unsqueeze(1).expand(-1, masks.shape[-1], -1).to(torch.long)
                 # )
-                curr_masks = masks[torch.arange(bsz), curr_input_pos].unsqueeze(1)
+                curr_masks = masks[:, curr_input_pos, : curr_input_pos.max() + 1]
+                # import pdb
+
+                # pdb.set_trace()
                 # curr_masks = masks[:, curr_input_pos, curr_input_pos]
         else:
             curr_input_pos = input_pos[:, : curr_pos + 1]
@@ -222,14 +235,14 @@ def generate_with_logits(
             if curr_masks is not None:
                 curr_masks = masks[:, : curr_pos + 1, : curr_pos + 1]
 
-        # pdb.set_trace()
+        pdb.set_trace()
         q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(
             1, generator=rng
         )
         logits, tokens = custom_generate_next_token_with_logits(
             model,
-            input_pos=curr_input_pos.unsqueeze(-1),
-            x=tokens.clone(),
+            input_pos=curr_input_pos,
+            x=tokens,
             mask=curr_masks,
             temperature=temperature,
             top_k=top_k,
@@ -238,9 +251,5 @@ def generate_with_logits(
         )
         generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
         curr_pos += 1
-        # if padding_masks.any():
-        #     mask = torch.nn.functional.pad(mask, (0, 1, 0, 1))
-        #     mask[:, -1, :] = mask[:, -2, :]
-        #     mask[..., -1, -1] = True
 
     return generated_tokens, logits

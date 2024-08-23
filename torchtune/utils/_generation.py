@@ -10,13 +10,13 @@ import torch
 from torchtune.modules import TransformerDecoder
 
 
-def multinomial_sample_one(probs: torch.Tensor, q=None) -> torch.Tensor:
+def multinomial_sample_one(probs: torch.Tensor) -> torch.Tensor:
     """Samples from a multinomial distribution."""
-    q = torch.empty_like(probs).exponential_(1) if q is None else q
+    q = torch.empty_like(probs).exponential_(1)
     return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
 
 
-def sample(logits: torch.Tensor, temperature: float = 1.0, top_k: int = None, q=None) -> torch.Tensor:
+def sample(logits: torch.Tensor, temperature: float = 1.0, top_k: int = None) -> torch.Tensor:
     """Generic sample from a probability distribution."""
     # scale the logits based on temperature
     logits = logits / max(temperature, 1e-5)
@@ -29,7 +29,7 @@ def sample(logits: torch.Tensor, temperature: float = 1.0, top_k: int = None, q=
         logits = torch.where(logits < pivot, -float("Inf"), logits)
     # change logits into probabilities
     probs = torch.nn.functional.softmax(logits, dim=-1)
-    return multinomial_sample_one(probs, q=q)
+    return multinomial_sample_one(probs)
 
 
 def generate_next_token(
@@ -38,13 +38,12 @@ def generate_next_token(
     x: torch.Tensor,
     temperature: float = 1.0,
     top_k: int = None,
-    q=None,
 ) -> torch.Tensor:
     """Generates the next tokens."""
     # model produces logits in [bsz, seq_length, vocab_size]
     # we want to take the last token's logits as the input to the next model call
     logits = model(x, input_pos=input_pos)[:, -1]
-    return sample(logits, temperature, top_k, q=q)
+    return sample(logits, temperature, top_k)
 
 
 def update_stop_tokens_tracker(
@@ -114,10 +113,13 @@ def generate(
 
     # generate the first tokens conditioned on the prompt
     input_pos = torch.arange(0, model.max_seq_len, device=prompt.device)
-    rng = torch.Generator(prompt.device)
-    q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(1, generator=rng)
+
     tokens = generate_next_token(
-        model, input_pos=input_pos[:prompt_length], x=prompt, temperature=temperature, top_k=top_k, q=q
+        model,
+        input_pos=input_pos[:prompt_length],
+        x=prompt,
+        temperature=temperature,
+        top_k=top_k,
     )
     generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
 
@@ -151,7 +153,6 @@ def generate(
             x=tokens,
             temperature=temperature,
             top_k=top_k,
-            q=torch.empty((bsz, model.tok_embeddings.num_embeddings)).exponential_(1, generator=rng).to(prompt.device),
         )
 
         generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)

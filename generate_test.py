@@ -30,24 +30,37 @@ model.load_state_dict(state_dict=state_dict)
 model.eval()
 tokenizer = llama2_tokenizer("./target/1b_normal/tokenizer.model")
 
-prompt = """
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla fermentum sapien vitae arcu volutpat egestas. Duis euismod nunc lorem, aliquet laoreet ex blandit vel. Vivamus sodales lacus velit, a hendrerit erat ornare vitae. Nam auctor nulla sit amet tempus pretium. Ut bibendum ullamcorper elit vel porttitor. Maecenas ut lacus in sapien suscipit condimentum. Sed eu massa mauris. Nullam id diam erat. Aenean quis nunc eu libero ultrices ullamcorper ut placerat odio. Aenean nunc elit, tincidunt in erat non, congue finibus tellus. Donec tellus nibh, imperdiet non justo nec, rutrum efficitur lacus.
+# prompt = """
+# Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla fermentum sapien vitae arcu volutpat egestas. Duis euismod nunc lorem, aliquet laoreet ex blandit vel. Vivamus sodales lacus velit, a hendrerit erat ornare vitae. Nam auctor nulla sit amet tempus pretium. Ut bibendum ullamcorper elit vel porttitor. Maecenas ut lacus in sapien suscipit condimentum. Sed eu massa mauris. Nullam id diam erat. Aenean quis nunc eu libero ultrices ullamcorper ut placerat odio. Aenean nunc elit, tincidunt in erat non, congue finibus tellus. Donec tellus nibh, imperdiet non justo nec, rutrum efficitur lacus.
 
-Ut non commodo nisi. Nulla dapibus porta velit facilisis gravida. Phasellus interdum turpis quis facilisis ornare. Praesent maximus mauris eget quam rutrum aliquam. Duis vitae libero in tellus maximus gravida sed in augue. Aenean eu efficitur quam, id hendrerit velit. Donec porta sit amet mauris ut auctor. Suspendisse potenti. Maecenas pulvinar elit a enim volutpat, commodo pulvinar nisi rhoncus. 
+# Ut non commodo nisi. Nulla dapibus porta velit facilisis gravida. Phasellus interdum turpis quis facilisis ornare. Praesent maximus mauris eget quam rutrum aliquam. Duis vitae libero in tellus maximus gravida sed in augue. Aenean eu efficitur quam, id hendrerit velit. Donec porta sit amet mauris ut auctor. Suspendisse potenti. Maecenas pulvinar elit a enim volutpat, commodo pulvinar nisi rhoncus.
+# """
+
+prompt = """
+SCENE VIII.
+A field of battle between the Roman and the Volscian camps
+
+Alarum, as in battle. Enter MARCIUS and AUFIDIUS at several doors
+
+  MARCIUS. I'll fight with none but thee, for I do hate thee
+    Worse than a promise-breaker.
+  AUFIDIUS. We hate alike:
+    Not Afric owns a serpent I abhor
+    More than thy fame and envy. Fix thy foot.
+  MARCIUS. Let the first budger die the other's slave,
+    And the gods doom him after!
 """
 
-# prompt = "The quick brown fox jumped over the lazy dog and went to"
-
 batch_size = 1
-max_generated_tokens = 256
+max_generated_tokens = 32
 with device:
     model.setup_caches(batch_size=batch_size, dtype=dtype)
 
 prompt = torch.tensor(tokenizer.encode(prompt, add_eos=False), dtype=torch.int, device=device).repeat(batch_size, 1)
-# prompt = torch.hstack(
-#     (torch.ones(batch_size, prompt.shape[-1] // 4, device=device, dtype=torch.int) * tokenizer.pad_id, prompt)
-# )
-# prompt[:2][: prompt.shape[-1] // 4] = tokenizer.pad_id
+prompt = torch.hstack(
+    (torch.ones(batch_size, prompt.shape[-1] // 4, device=device, dtype=torch.int) * tokenizer.pad_id, prompt)
+)
+# prompt[0][: prompt.shape[-1] // 4] = tokenizer.pad_id
 
 # ['cudagraphs', 'inductor', 'onnxrt', 'openxla', 'tvm']
 import logging
@@ -58,9 +71,6 @@ torch._logging.set_logs(
 
 
 def generate_with_compile():
-
-    rng = torch.Generator(prompt.device)
-    rng.manual_seed(42)
     custom_generate_next_token = torch.compile(utils.generate_next_token, fullgraph=True, backend="inductor")
     print("Warmup run!")
     t0_comp = time.perf_counter()
@@ -72,7 +82,6 @@ def generate_with_compile():
         top_k=None,
         stop_tokens=None,
         custom_generate_next_token=custom_generate_next_token,
-        rng=rng,
     )
     t_comp = time.perf_counter() - t0_comp
     print(f"Time for warmup: {t_comp:.02f} sec")
@@ -138,19 +147,19 @@ def generate_rlhf_with_compile():
     t_comp = time.perf_counter() - t0_comp
     print(f"Time for warmup: {t_comp:.02f} sec")
 
-    print("Warmup run2!")
-    t0_comp = time.perf_counter()
-    rlhf.generate_with_logits(
-        model=model,
-        prompt=prompt,
-        max_generated_tokens=3,
-        temperature=1.0,
-        top_k=None,
-        custom_generate_next_token_with_logits=custom_generate_next_token,
-        rng=rng,
-    )
-    t_comp = time.perf_counter() - t0_comp
-    print(f"Time for warmup: {t_comp:.02f} sec")
+    # print("Warmup run2!")
+    # t0_comp = time.perf_counter()
+    # rlhf.generate_with_logits(
+    #     model=model,
+    #     prompt=prompt,
+    #     max_generated_tokens=3,
+    #     temperature=1.0,
+    #     top_k=None,
+    #     custom_generate_next_token_with_logits=custom_generate_next_token,
+    #     rng=rng,
+    # )
+    # t_comp = time.perf_counter() - t0_comp
+    # print(f"Time for warmup: {t_comp:.02f} sec")
 
     t0 = time.perf_counter()
     outputs, _ = rlhf.generate_with_logits(

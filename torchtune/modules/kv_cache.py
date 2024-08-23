@@ -50,17 +50,17 @@ class KVCache(nn.Module):
         Raises an assertion error if ``input_pos`` is longer than the maximum sequence length.
 
         Args:
-            input_pos (Tensor): Current position tensor with shape [S]
+            input_pos (Tensor): Current position tensor with shape [S] or [B, S]
             k_val (Tensor): Current key tensor with shape [B, H, S, D]
             v_val (Tensor): Current value tensor with shape [B, H, S, D]
 
         Returns:
             Tuple[Tensor, Tensor]: Updated KV cache with key first
         """
-
         assert input_pos.shape[-1] == k_val.shape[2]
+        input_pos = input_pos.view(1, -1) if input_pos.ndim == 1 else input_pos
         self.size = input_pos.dim()
-
+        size = input_pos.max() + 1
         k_out = self.k_cache
         v_out = self.v_cache
         _, num_heads, _, d_k = k_out.shape
@@ -73,4 +73,7 @@ class KVCache(nn.Module):
         # k_out[:, :, input_pos] = k_val
         # v_out[:, :, input_pos] = v_val
 
-        return k_out, v_out
+        import pdb
+
+        # pdb.set_trace()
+        return k_out[:, :, :size], v_out[:, :, :size]
