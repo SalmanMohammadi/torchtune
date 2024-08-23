@@ -69,6 +69,7 @@ def generate_next_token_with_logits(
     """
     # model produces logits in [bsz, seq_length, vocab_size]
     # we want to take the last token's logits as the input to the next model call
+
     logits = model(x, input_pos=input_pos, mask=mask)
     return logits, sample(logits[:, -1].clone(), temperature, top_k, rng, q)
 
@@ -201,9 +202,9 @@ def generate_with_logits(
 
     curr_pos = prompt_length
 
-    for _ in range(max_generated_tokens - 1):
+    for i in range(max_generated_tokens - 1):
         if incremental_decoding:
-            curr_input_pos = input_pos[:, curr_pos]
+            curr_input_pos = input_pos[:, curr_pos].contiguous()
             if curr_masks is not None:
                 # input_pos_expanded = curr_input_pos.unsqueeze(1).expand(-1, masks.shape[-1])
                 # import pdb

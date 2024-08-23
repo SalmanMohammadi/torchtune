@@ -52,7 +52,9 @@ prompt = torch.tensor(tokenizer.encode(prompt, add_eos=False), dtype=torch.int, 
 # ['cudagraphs', 'inductor', 'onnxrt', 'openxla', 'tvm']
 import logging
 
-torch._logging.set_logs(dynamo=logging.WARNING, recompiles=True, graph_breaks=True, guards=False)
+torch._logging.set_logs(
+    dynamo=logging.WARNING, inductor=logging.WARNING, recompiles=True, graph_breaks=True, guards=False, cudagraphs=True
+)
 
 
 def generate_with_compile():
@@ -122,7 +124,8 @@ def generate_rlhf_with_compile():
         rlhf.generate_next_token_with_logits, fullgraph=True, backend="inductor"
     )
     print("Warmup run!")
-    t0 = time.perf_counter()
+    t0_comp = time.perf_counter()
+    torch.compiler.cudagraph_mark_step_begin()
     rlhf.generate_with_logits(
         model=model,
         prompt=prompt,
@@ -132,8 +135,22 @@ def generate_rlhf_with_compile():
         custom_generate_next_token_with_logits=custom_generate_next_token,
         rng=rng,
     )
-    t = time.perf_counter() - t0
-    print(f"Time for warmup: {t:.02f} sec")
+    t_comp = time.perf_counter() - t0_comp
+    print(f"Time for warmup: {t_comp:.02f} sec")
+
+    print("Warmup run2!")
+    t0_comp = time.perf_counter()
+    rlhf.generate_with_logits(
+        model=model,
+        prompt=prompt,
+        max_generated_tokens=3,
+        temperature=1.0,
+        top_k=None,
+        custom_generate_next_token_with_logits=custom_generate_next_token,
+        rng=rng,
+    )
+    t_comp = time.perf_counter() - t0_comp
+    print(f"Time for warmup: {t_comp:.02f} sec")
 
     t0 = time.perf_counter()
     outputs, _ = rlhf.generate_with_logits(
