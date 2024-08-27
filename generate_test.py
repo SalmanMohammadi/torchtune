@@ -7,7 +7,7 @@ import time
 import sys
 
 args = sys.argv
-temperature = 0.8
+temperature = 0.7
 torch.manual_seed(42)
 device = torch.device("cuda")
 dtype = torch.float16
@@ -30,11 +30,11 @@ model.load_state_dict(state_dict=state_dict)
 model.eval()
 tokenizer = llama2_tokenizer("./target/1b_normal/tokenizer.model")
 
-# prompt = """
-# Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla fermentum sapien vitae arcu volutpat egestas. Duis euismod nunc lorem, aliquet laoreet ex blandit vel. Vivamus sodales lacus velit, a hendrerit erat ornare vitae. Nam auctor nulla sit amet tempus pretium. Ut bibendum ullamcorper elit vel porttitor. Maecenas ut lacus in sapien suscipit condimentum. Sed eu massa mauris. Nullam id diam erat. Aenean quis nunc eu libero ultrices ullamcorper ut placerat odio. Aenean nunc elit, tincidunt in erat non, congue finibus tellus. Donec tellus nibh, imperdiet non justo nec, rutrum efficitur lacus.
+prompt = """
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nulla fermentum sapien vitae arcu volutpat egestas. Duis euismod nunc lorem, aliquet laoreet ex blandit vel. Vivamus sodales lacus velit, a hendrerit erat ornare vitae. Nam auctor nulla sit amet tempus pretium. Ut bibendum ullamcorper elit vel porttitor. Maecenas ut lacus in sapien suscipit condimentum. Sed eu massa mauris. Nullam id diam erat. Aenean quis nunc eu libero ultrices ullamcorper ut placerat odio. Aenean nunc elit, tincidunt in erat non, congue finibus tellus. Donec tellus nibh, imperdiet non justo nec, rutrum efficitur lacus.
 
-# Ut non commodo nisi. Nulla dapibus porta velit facilisis gravida. Phasellus interdum turpis quis facilisis ornare. Praesent maximus mauris eget quam rutrum aliquam. Duis vitae libero in tellus maximus gravida sed in augue. Aenean eu efficitur quam, id hendrerit velit. Donec porta sit amet mauris ut auctor. Suspendisse potenti. Maecenas pulvinar elit a enim volutpat, commodo pulvinar nisi rhoncus.
-# """
+Ut non commodo nisi. Nulla dapibus porta velit facilisis gravida. Phasellus interdum turpis quis facilisis ornare. Praesent maximus mauris eget quam rutrum aliquam. Duis vitae libero in tellus maximus gravida sed in augue. Aenean eu efficitur quam, id hendrerit velit. Donec porta sit amet mauris ut auctor. Suspendisse potenti. Maecenas pulvinar elit a enim volutpat, commodo pulvinar nisi rhoncus.
+"""
 
 prompt = """
 SCENE VIII.
@@ -67,8 +67,8 @@ Alarum, as in battle. Enter MARCIUS and AUFIDIUS at several doors
     Think thou it but a Satyre's liking
 """
 
-batch_size = 4
-max_generated_tokens = 256
+batch_size = 8
+max_generated_tokens = 128
 prompt = torch.tensor(tokenizer.encode(prompt, add_eos=False), dtype=torch.int, device=device).repeat(batch_size, 1)
 prompt = torch.hstack(
     (torch.ones(batch_size, prompt.shape[-1] // 4, device=device, dtype=torch.int) * tokenizer.pad_id, prompt)
@@ -76,9 +76,9 @@ prompt = torch.hstack(
 # prompt[0][: prompt.shape[-1] // 4] = tokenizer.pad_id
 
 # ['cudagraphs', 'inductor', 'onnxrt', 'openxla', 'tvm']
-
+# model.max_seq_len = prompt.shape[-1] + max_generated_tokens + 128
 with device:
-    model.setup_caches(batch_size=batch_size, dtype=dtype)#, max_seq_len=prompt.shape[-1] + max_generated_tokens)
+    model.setup_caches(batch_size=batch_size, dtype=dtype, max_seq_len=prompt.shape[-1] + max_generated_tokens)
 
 import logging
 

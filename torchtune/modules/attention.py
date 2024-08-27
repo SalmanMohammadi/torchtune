@@ -180,6 +180,10 @@ class MultiHeadAttention(nn.Module):
                 of each token relative to its sample when packed, shape [b x s].
                 During inference, this indicates the position of the current token.
                 If none, assume the index of the token is its position id. Default is None.
+            cache_pos (Optional[Tensor]): Optional tensor which contains the cache positions
+                of each token, used during inference. This is useful when ``input_ids`` are
+                right-shifted to account for padding tokens. Default is None, in which case
+                ``input_pos`` is used (if specified).
 
         Returns:
             Tensor: output tensor with attention applied
@@ -200,11 +204,11 @@ class MultiHeadAttention(nn.Module):
         b, s_x, _ = x.shape
         y = y if y is not None else x
         s_y = y.shape[1]
-        cache_pos = input_pos if cache_pos is None else cache_pos
-        if self.kv_cache and cache_pos is None:
+        if self.kv_cache and input_pos is None:
             cache_size = self.kv_cache.size
             input_pos = torch.arange(cache_size, cache_size + s_y, device=x.device)
 
+        cache_pos = input_pos if cache_pos is None else cache_pos
         # q has shape [b, s_x, num_heads * head_dim]
         # k has shape [b, s_y, num_kv_heads * head_dim]
         # v has shape [b, s_y, num_kv_heads * head_dim]
@@ -253,26 +257,14 @@ class MultiHeadAttention(nn.Module):
             k = self.k_norm(k)
 
         # shape: [b, 1, s, s]
+        if mask is not None:
+            mask = mask[:, None, :, :]
 
         # Update key-value cache
         if self.kv_cache is not None:
             k, v = self.kv_cache.update(cache_pos, k, v)
-            # if mask is not None:
-            # import pdb
 
-            # pdb.set_trace()
-            # mask = torch.nn.functional.pad(mask, (0, self.max_seq_len - s_x))
-
-        if mask is not None:
-            mask = mask[:, None, :, :]
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
-        import pdb
-
-        # print(mask.shape)
-        # if mask.shape[-2] == 1:
-        #     pdb.set_trace()
-        #     print(mask[:, :, :, :5], q.shape, mask.shape)
-        # pdb.set_trace()
         output = nn.functional.scaled_dot_product_attention(
             q,
             k,

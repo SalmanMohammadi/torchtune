@@ -338,7 +338,7 @@ class TransformerDecoder(nn.Module):
         self.max_seq_len = max_seq_len
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.causal_mask = None
+        self._cache_max_seq_len = None
 
     def setup_caches(self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None) -> None:
         """Setup key value caches for attention calculation.
@@ -349,12 +349,10 @@ class TransformerDecoder(nn.Module):
             max_seq_len (Optional[int]): maximum sequence length for the caches. Default None,
                 in which case ``model.max_seq_len`` is used.
         """
+        self.cache_max_seq_len = self.max_seq_len if max_seq_len is None else max_seq_len
         for layer in self.layers:
-            layer.setup_cache(batch_size, dtype, max_seq_len=max_seq_len)
+            layer.setup_cache(batch_size, dtype, max_seq_len=self.cache_max_seq_len)
 
-        # causal_mask is used during inference to ensure we're attending
-        # to the right tokens
-        self.causal_mask = torch.tril(torch.ones(self.max_seq_len, self.max_seq_len, dtype=torch.bool))
 
     def caches_are_enabled(self) -> bool:
         """Check if the key value caches are setup."""
@@ -410,7 +408,24 @@ class TransformerDecoder(nn.Module):
             ValueError: if causal_mask is set but input_pos is None
             ValueError: if seq_len of x is bigger than max_seq_len
 
-        Notation used for tensor shapes:
+        Note:
+            At the very first step of inference, when the model is provided with a prompt,
+            ``input_pos`` should contain the positions of all of the tokens in the prompt.
+            For a single-batch prompt, or a batch of prompts with identical lengths, this
+            will be``torch.arange(prompt_length)``. For a batch of varying-length prompts,
+            shorter prompts are left-padded and position ids are correspondingly right-shifted,
+            thus positional ids should be of shape ``[b, padded_prompt_length]``.
+            This is because we will need to retrieve the positional embeddings for each input id. 
+            In the subsequent steps, if the model has been setup with KV-caches, ``input_pos`` will contain
+            the position(s) of the current token(s) ``torch.tensor([padded_prompt_length])``. Otherwise,
+            ``input_pos`` will contain all the position ids up to the current token.
+
+            In the case above when ``input_pos`` are right-shifted due to padding, ``cache_pos``
+            should be used to correctly update KV-caches, where ``cache_pos`` is ``torch.arange(prompt_length)``
+            during the first pre-fill step, and ``torch.tensor([prompt_length])`` for subsequent steps.
+            This argument is only required when input ids are padded.
+
+        Shape notation:
             - b: batch size
             - s: token sequence length
             - s_e: encoder sequence length
@@ -430,17 +445,17 @@ class TransformerDecoder(nn.Module):
         # shape: [b, s, d]
         h = self.tok_embeddings(tokens)
 
-        if self.causal_mask is not None:
-            if input_pos is None:
-                raise ValueError("Caches are setup, but the position of input token is missing")
-            if mask is not None:
-                raise ValueError("An attention mask was set. Cannot use a non-causal mask for inference")
-            # shape: [1, input_pos_len, m_s]
-            # in most cases input_pos_len should be 1
-            import pdb
+        # if self.caches_are_enabled():
+        #     if input_pos is None and cache_pos is None:
+        #         raise ValueError("Caches are setup, but the neither input positions or cache positions were provided.")
+        # #     if mask is not None:
+        #         raise ValueError("An attention mask was set. Cannot use a non-causal mask for inference")
+        #     # shape: [1, input_pos_len, m_s]
+        #     # in most cases input_pos_len should be 1
+        #     import pdb
 
             # pdb.set_trace()
-            mask = self.causal_mask[None, input_pos]
+            # mask = self.causal_mask[None, input_pos]
             # pdb.set_trace()
 
         hidden = []

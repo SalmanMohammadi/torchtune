@@ -7,7 +7,7 @@
 from ._generation import (
     generate_next_token_with_logits,
     generate_with_logits,
-    get_causal_mask,
+    get_causal_mask_from_padding_mask,
 )
 
 from ._types import PPOStats, Trajectory
@@ -31,7 +31,7 @@ __all__ = [
     "generate_with_logits",
     "generate_next_token_with_logits",
     "truncate_sequence_at_first_stop_token",
-    "get_causal_mask",
+    "get_causal_mask_from_padding_mask",
     "logits_to_logprobs",
     "truncate_sequence_for_logprobs",
     "get_reward_penalty_mask",

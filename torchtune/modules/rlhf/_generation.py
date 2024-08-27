@@ -75,9 +75,7 @@ def generate_next_token_with_logits(
     return logits, sample(logits[:, -1].clone(), temperature, top_k, rng, q)
 
 
-def get_causal_mask(
-    padding_mask: torch.Tensor,
-) -> torch.Tensor:
+def get_causal_mask_from_padding_mask(padding_mask: torch.Tensor, target_seq_len: Optional[int]) -> torch.Tensor:
     """
     Converts an attention mask of shape ``[bsz, seq_len]`` to a causal attention mask suitable for
     consumption by :func:`~torch.nn.functional.scaled_dot_product_attention~`.
@@ -86,16 +84,34 @@ def get_causal_mask(
     https://github.com/huggingface/transformers/blob/a564d10afe1a78c31934f0492422700f61a0ffc0/src/transformers/models/mistral/modeling_mistral.py#L1096
 
     Args:
-        padding_mask (torch.Tensor): Boolean tensor where True indicates participation in attention
-            with shape [bsz x seq_length]
+        padding_mask (torch.Tensor): Boolean tensor where True indicates the corresponding token in the sequence
+            is a padding token and should be masked out in attention, with shape [bsz x seq_length]
     Returns:
         torch.Tensor: Boolean causal mask with shape [bsz x seq_length x seq_length]
     """
-    _, seq_len = padding_mask.shape
-    mask = torch.tril(torch.ones(seq_len, seq_len, device=padding_mask.device, dtype=bool), diagonal=0)
-    mask = mask & (padding_mask[:, None, :] & padding_mask[:, :, None])
-    mask.diagonal(dim1=1, dim2=2)[:] = True
+    bsz, seq_len = padding_mask.shape
+    target_seq_len = seq_len if target_seq_len is None else target_seq_len
+
+    if target_seq_len < seq_len:
+        raise AssertionError("target_seq_len cannot be shorter than the sequence length of the padding mask.")
+
+    mask = torch.tril(torch.ones(seq_len, target_seq_len, device=padding_mask.device, dtype=bool), diagonal=0).repeat(
+        bsz, 1, 1
+    )
+    mask[:, :, :seq_len] *= padding_mask[:, None, :].expand(-1, seq_len, -1)
+    mask.diagonal(dim1=1, dim2=2).copy_(True)
     return mask
+
+
+def get_position_ids_from_padding_mask(
+    padding_mask: torch.Tensor,
+):
+    """
+    Args:
+        padding_mask (torch.Tensor): Boolean tensor where True indicates the corresponding token in the sequence
+            is a padding token and should be masked out in attention,
+    """
+    return (padding_mask.cumsum(-1) - 1) * padding_mask
 
 
 @torch.inference_mode()
@@ -146,44 +162,58 @@ def generate_with_logits(
     generated_tokens = prompt.clone()
     total_response_length = prompt_length + max_generated_tokens
     incremental_decoding = model.caches_are_enabled()
+    max_seq_len = total_response_length if not incremental_decoding else model.cache_max_seq_len
     padding_masks = generated_tokens != pad_id
-    masks = torch.tril(
-        torch.ones(
-            total_response_length,
-            total_response_length,
-            dtype=torch.bool,
-            device=prompt.device,
-        ).repeat(bsz, 1, 1)
-    )
 
+    # masks = torch.tril(
+    #     torch.ones(
+    #         total_response_length,
+    #         max_seq_len,
+    #         dtype=torch.bool,
+    #         device=prompt.device,
+    #     )
+    # ).unsqueeze(0)
     if not padding_masks.all():
-        prompt_masks = get_causal_mask(padding_masks)
-        masks[:, :prompt_length, :prompt_length] = prompt_masks
-        masks[:, prompt_length:, :prompt_length] = prompt_masks[:, -1:, :].clone()
-        input_pos = padding_masks.cumsum(-1) - 1
-        input_pos.masked_fill_(~padding_masks, 1)
-        start_positions = input_pos.max(dim=-1, keepdim=False)[0]
-        extended_input_pos = torch.stack(
-            [
-                torch.arange(start_pos + 1, start_pos + max_generated_tokens, dtype=torch.long, device=prompt.device)
-                for start_pos in start_positions
-            ]
-        )
-        input_pos = torch.hstack((input_pos, extended_input_pos)).contiguous()
+
+        padding_masks = torch.nn.functional.pad(padding_masks, (0, max_generated_tokens), value=True)
+        # masks[:, :, :total_response_length] *= padding_masks[:, None, :].expand(-1, total_response_length, -1)
+        # masks.diagonal(dim1=1, dim2=2).copy_(True)
+        masks = get_causal_mask_from_padding_mask(padding_masks, target_seq_len=max_seq_len)
+        # prompt_masks = get_causal_mask(padding_masks)
+        # masks[:, :prompt_length, :prompt_length] = prompt_masks
+        # masks[:, prompt_length:, :prompt_length] = prompt_masks[:, -1:, :].clone()
+
+        input_pos = get_position_ids_from_padding_mask(padding_masks)
+        # input_pos.masked_fill_(~padding_masks, 1)
+
+        # start_positions = input_pos.max(dim=-1, keepdim=False)[0]
+        # extended_input_pos = torch.stack(
+        #     [
+        #         torch.arange(start_pos + 1, start_pos + max_generated_tokens, dtype=torch.long, device=prompt.device)
+        #         for start_pos in start_positions
+        #     ]
+        # )
+        # input_pos = torch.hstack((input_pos, extended_input_pos)).contiguous()
         cache_pos = torch.arange(0, total_response_length, device=generated_tokens.device)
     else:
+        masks = torch.tril(
+            torch.ones(
+                total_response_length,
+                max_seq_len,
+                dtype=torch.bool,
+                device=prompt.device,
+            )
+        ).unsqueeze(0)
         input_pos = torch.arange(0, total_response_length, device=generated_tokens.device).unsqueeze(0)
         cache_pos = None
 
+    del padding_masks
     if incremental_decoding:
         curr_masks = masks[:, :prompt_length]
     else:
         cache_pos = None
         curr_masks = masks[:, :prompt_length, :prompt_length]
 
-    model.causal_mask = None
-
-    # lets grab the first tokens
     q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(1, generator=rng)
     _, tokens = generate_next_token_with_logits(
         model,
@@ -199,27 +229,17 @@ def generate_with_logits(
     generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
 
     curr_pos = prompt_length
-    import pdb
-
     curr_cache_pos = None
-    # pdb.set_trace()
-    for i in range(max_generated_tokens - 1):
+    for _ in range(max_generated_tokens - 1):
         if incremental_decoding:
             curr_input_pos = input_pos[:, curr_pos]
             curr_cache_pos = cache_pos[curr_pos].unsqueeze(0) if cache_pos is not None else None
-            import pdb
-
-            # pdb.set_trace()
             curr_masks = masks[:, curr_pos, None, :]
         else:
-
-            curr_input_pos = input_pos[:, : curr_pos + 1]
             tokens = generated_tokens.clone()
+            curr_input_pos = input_pos[:, : curr_pos + 1]
             curr_masks = masks[:, : curr_pos + 1, : curr_pos + 1]
 
-        # print(i, prompt_length + i, curr_pos, curr_masks.shape, curr_input_pos)
-        # pdb.set_trace()
-        # print(curr_input_pos[:, -1], curr_masks[..., 37:curr_pos+1])
         q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(
             1, generator=rng
         )
