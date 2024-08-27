@@ -34,8 +34,12 @@ class KVCache(nn.Module):
     ) -> None:
         super().__init__()
         cache_shape = (batch_size, num_heads, max_seq_len, head_dim)
-        self.register_buffer("k_cache", torch.zeros(cache_shape, dtype=dtype), persistent=False)
-        self.register_buffer("v_cache", torch.zeros(cache_shape, dtype=dtype), persistent=False)
+        self.register_buffer(
+            "k_cache", torch.zeros(cache_shape, dtype=dtype), persistent=False
+        )
+        self.register_buffer(
+            "v_cache", torch.zeros(cache_shape, dtype=dtype), persistent=False
+        )
         self.size = 0
         self.batch_size = batch_size
 
@@ -44,21 +48,34 @@ class KVCache(nn.Module):
         self.k_cache.zero_()
         self.v_cache.zero_()
 
-    def update(self, cache_pos: Tensor, k_val: Tensor, v_val: Tensor) -> Tuple[Tensor, Tensor]:
+    def update(
+        self, cache_pos: Tensor, k_val: Tensor, v_val: Tensor
+    ) -> Tuple[Tensor, Tensor]:
         """Update KV cache with the new k_val, v_val and return the updated cache.
 
         Args:
-            cache_pos (Tensor): Current position tensor with shape [S]
+            cache_pos (Tensor): Current cache position tensor with shape [S]
             k_val (Tensor): Current key tensor with shape [B, H, S, D]
             v_val (Tensor): Current value tensor with shape [B, H, S, D]
 
         Returns:
-            Tuple[Tensor, Tensor]: Updated KV cache with key first
-        
+            Tuple[Tensor, Tensor]: (k_out, v_out) updated key and value cache, respectively.
+
         Raises:
-            AssertionError: if ``cache_pos`` is longer than the maximum sequence length.
+            AssertionError: if ``cache_pos`` is longer than the key-value sequence length.
+
+        Notation:
+            S: sequence length
+            B: batch size
+            H: number of attention heads
+            D: attention head dimension
         """
-        assert cache_pos.shape[0] == k_val.shape[2]
+        if cache_pos.shape[0] != k_val.shape[2]:
+            raise AssertionError(
+                "The sequence length of cache_pos must be the same as "
+                "the sequence length of the k-v cache. Found cache_pos.shape[0]"
+                f"={cache_pos.shape[0]} and k_val.shape[2]={k_val.shape[2]}."
+            )
         self.size = cache_pos.max() + 1
 
         k_out = self.k_cache

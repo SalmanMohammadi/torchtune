@@ -100,10 +100,16 @@ class MultiHeadAttention(nn.Module):
     ) -> None:
         super().__init__()
         if num_heads % num_kv_heads != 0:
-            raise ValueError(f"num_heads ({num_heads}) must be divisible by " f"num_kv_heads ({num_kv_heads})")
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by "
+                f"num_kv_heads ({num_kv_heads})"
+            )
 
         if embed_dim % num_heads != 0:
-            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by " f"num_heads ({num_heads})")
+            raise ValueError(
+                f"embed_dim ({embed_dim}) must be divisible by "
+                f"num_heads ({num_heads})"
+            )
 
         if attn_dropout < 0 or attn_dropout > 1:
             raise ValueError(f"attn_dropout ({embed_dim}) must be between 0.0 and 1.0")
@@ -130,17 +136,22 @@ class MultiHeadAttention(nn.Module):
         self.k_norm = k_norm
         self.pos_embeddings = pos_embeddings
 
-    def setup_cache(self, batch_size: int, dtype: torch.dtype, max_seq_len: int = None) -> None:
+    def setup_cache(
+        self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None
+    ) -> None:
         """Setup key value caches for attention calculation. If called
         after kv_cache is already setup, this will be skipped.
 
         Args:
             batch_size (int): batch size for the caches.
             dtype (torch.dtype): dtype for the caches.
+            max_seq_len (Optional[int]): maximum sequence length to initialize caches with.
         """
         # Don't overwrite user defined kv_cache from init
         if self.kv_cache is not None:
-            logger.warning("Key value caches are already setup. You cannot call ``setup_caches()`` twice. Skipping.")
+            logger.warning(
+                "Key value caches are already setup. You cannot call ``setup_caches()`` twice. Skipping."
+            )
         else:
             self.kv_cache = KVCache(
                 batch_size=batch_size,
@@ -153,7 +164,9 @@ class MultiHeadAttention(nn.Module):
     def reset_cache(self):
         """Reset the key value caches."""
         if self.kv_cache is None:
-            raise RuntimeError("Key value caches are not setup. Call ``setup_caches()`` first.")
+            raise RuntimeError(
+                "Key value caches are not setup. Call ``setup_caches()`` first."
+            )
         self.kv_cache.reset()
 
     def forward(
@@ -261,7 +274,7 @@ class MultiHeadAttention(nn.Module):
             mask = mask[:, None, :, :]
 
         # Update key-value cache
-        if self.kv_cache is not None:
+        if self.kv_cache is not None and not self.training:
             k, v = self.kv_cache.update(cache_pos, k, v)
 
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/

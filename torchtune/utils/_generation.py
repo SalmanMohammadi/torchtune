@@ -16,7 +16,9 @@ def multinomial_sample_one(probs: torch.Tensor) -> torch.Tensor:
     return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.int)
 
 
-def sample(logits: torch.Tensor, temperature: float = 1.0, top_k: int = None) -> torch.Tensor:
+def sample(
+    logits: torch.Tensor, temperature: float = 1.0, top_k: int = None
+) -> torch.Tensor:
     """Generic sample from a probability distribution."""
     # scale the logits based on temperature
     logits = logits / max(temperature, 1e-5)
@@ -99,14 +101,18 @@ def generate(
     """
     prompt = prompt.view(1, -1) if prompt.ndim == 1 else prompt
     # convert stop tokens to tensor for easy matching
-    stop_tokens = torch.tensor(stop_tokens, device=prompt.device) if stop_tokens else None
+    stop_tokens = (
+        torch.tensor(stop_tokens, device=prompt.device) if stop_tokens else None
+    )
     bsz, prompt_length = prompt.size()
     generated_tokens = prompt.clone()
     # keeps track at a high level if we've already hit a stop token in a sequence so we can early stop
     stop_token_reached = torch.zeros(bsz, dtype=torch.bool, device=prompt.device)
     # everything in stop_token_mask starts as 1s, and we'll set them to 0 for sequences
     # that already hit a stop token
-    stop_token_mask = torch.ones((bsz, prompt_length + 1), dtype=torch.int32, device=prompt.device)
+    stop_token_mask = torch.ones(
+        (bsz, prompt_length + 1), dtype=torch.int32, device=prompt.device
+    )
 
     if custom_generate_next_token is None:
         custom_generate_next_token = generate_next_token
@@ -117,7 +123,7 @@ def generate(
     tokens = generate_next_token(
         model,
         input_pos=input_pos[:prompt_length],
-         x=prompt,
+        x=prompt,
         temperature=temperature,
         top_k=top_k,
     )
@@ -125,7 +131,9 @@ def generate(
 
     # stop early if we reach a stop token in every seq
     if stop_tokens is not None:
-        stop_token_reached = update_stop_tokens_tracker(tokens, stop_tokens, stop_token_reached)
+        stop_token_reached = update_stop_tokens_tracker(
+            tokens, stop_tokens, stop_token_reached
+        )
         if stop_token_reached.all().item():
             return generated_tokens.tolist()
 
@@ -137,14 +145,16 @@ def generate(
         # by appending the logical not of stop_token_reached to the end of the mask
         # reshaped to be bsz first
         if stop_tokens is not None:
-            stop_token_mask = torch.cat([stop_token_mask, ~stop_token_reached.reshape(bsz, 1)], dim=-1)
+            stop_token_mask = torch.cat(
+                [stop_token_mask, ~stop_token_reached.reshape(bsz, 1)], dim=-1
+            )
 
         # if incremental decoding is enabled, we can use the current position
         # otherwise, we take the whole sequence up to the current position
         if incremental_decoding:
             curr_input_pos = input_pos[curr_pos].unsqueeze(0)
         else:
-            curr_input_pos = input_pos[ : curr_pos + 1]
+            curr_input_pos = input_pos[: curr_pos + 1]
             tokens = generated_tokens.clone()
 
         tokens = custom_generate_next_token(
@@ -159,7 +169,9 @@ def generate(
         curr_pos += 1
 
         if stop_tokens is not None:
-            stop_token_reached = update_stop_tokens_tracker(tokens, stop_tokens, stop_token_reached)
+            stop_token_reached = update_stop_tokens_tracker(
+                tokens, stop_tokens, stop_token_reached
+            )
             if stop_token_reached.all().item():
                 break
 

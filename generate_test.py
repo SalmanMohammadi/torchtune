@@ -1,10 +1,17 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import itertools
-from torchtune.models.llama2 import llama2, llama2_tokenizer
-from torchtune import utils
-from torchtune.modules import rlhf
-import torch
-import time
 import sys
+import time
+
+import torch
+from torchtune import utils
+from torchtune.models.llama2 import llama2, llama2_tokenizer
+from torchtune.modules import rlhf
 
 args = sys.argv
 temperature = 0.7
@@ -13,7 +20,13 @@ device = torch.device("cuda")
 dtype = torch.float16
 with utils.set_default_dtype(dtype), device:
     model = llama2(
-        vocab_size=32000, num_layers=22, num_heads=32, embed_dim=2048, max_seq_len=2048, norm_eps=1e-5, num_kv_heads=4
+        vocab_size=32000,
+        num_layers=22,
+        num_heads=32,
+        embed_dim=2048,
+        max_seq_len=2048,
+        norm_eps=1e-5,
+        num_kv_heads=4,
     )
 utils.validate_expected_param_dtype(model.named_parameters(), dtype=dtype)
 checkpointer = utils.FullModelHFCheckpointer(
@@ -69,16 +82,26 @@ Alarum, as in battle. Enter MARCIUS and AUFIDIUS at several doors
 
 batch_size = 8
 max_generated_tokens = 128
-prompt = torch.tensor(tokenizer.encode(prompt, add_eos=False), dtype=torch.int, device=device).repeat(batch_size, 1)
+prompt = torch.tensor(
+    tokenizer.encode(prompt, add_eos=False), dtype=torch.int, device=device
+).repeat(batch_size, 1)
 prompt = torch.hstack(
-    (torch.ones(batch_size, prompt.shape[-1] // 4, device=device, dtype=torch.int) * tokenizer.pad_id, prompt)
+    (
+        torch.ones(batch_size, prompt.shape[-1] // 4, device=device, dtype=torch.int)
+        * tokenizer.pad_id,
+        prompt,
+    )
 )
 # prompt[0][: prompt.shape[-1] // 4] = tokenizer.pad_id
 
 # ['cudagraphs', 'inductor', 'onnxrt', 'openxla', 'tvm']
 # model.max_seq_len = prompt.shape[-1] + max_generated_tokens + 128
 with device:
-    model.setup_caches(batch_size=batch_size, dtype=dtype, max_seq_len=prompt.shape[-1] + max_generated_tokens)
+    model.setup_caches(
+        batch_size=batch_size,
+        dtype=dtype,
+        max_seq_len=prompt.shape[-1] + max_generated_tokens,
+    )
 
 import logging
 
@@ -94,7 +117,9 @@ torch._logging.set_logs(
 
 
 def generate_with_compile():
-    custom_generate_next_token = torch.compile(utils.generate_next_token, fullgraph=True, backend="inductor")
+    custom_generate_next_token = torch.compile(
+        utils.generate_next_token, fullgraph=True, backend="inductor"
+    )
     print("Warmup run!")
     t0_comp = time.perf_counter()
     utils.generate(
@@ -224,7 +249,12 @@ tokens_generated = generated_tokens[
     :, prompt.shape[-1] :
 ].numel()  # (len(generated_tokens[0]) - prompt.size(0)) * batch_size
 tokens_sec = tokens_generated / t
-model_size = sum([p.numel() * p.dtype.itemsize for p in itertools.chain(model.parameters(), model.buffers())])
+model_size = sum(
+    [
+        p.numel() * p.dtype.itemsize
+        for p in itertools.chain(model.parameters(), model.buffers())
+    ]
+)
 
 print(f"Time for inference: {t:.02f} sec total, {tokens_sec:.02f} tokens/sec")
 print(f"Bandwidth achieved: {model_size * tokens_sec / 1e9:.02f} GB/s")

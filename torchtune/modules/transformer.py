@@ -43,7 +43,9 @@ class TransformerSelfAttentionLayer(nn.Module):
         self.sa_scale = sa_scale or nn.Identity()
         self.mlp_scale = mlp_scale or nn.Identity()
 
-    def setup_cache(self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None) -> None:
+    def setup_cache(
+        self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None
+    ) -> None:
         """Setup key value caches for attention calculation.
 
         Args:
@@ -87,6 +89,10 @@ class TransformerSelfAttentionLayer(nn.Module):
                 of each token relative to its sample when packed, shape [b x s].
                 During inference, this indicates the position of the current token.
                 If none, assume the index of the token is its position id. Default is None.
+            cache_pos (Optional[Tensor]): Optional tensor which contains the cache positions
+                of each token, used during inference. This is useful when ``input_ids`` are
+                right-shifted to account for padding tokens. Default is None, in which case
+                ``input_pos`` is used (if specified).
             **kwargs (Dict): transformer layer inputs not relevant to self attention.
 
         Returns:
@@ -99,7 +105,9 @@ class TransformerSelfAttentionLayer(nn.Module):
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
-        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos, cache_pos=cache_pos)
+        attn_out = self.attn(
+            self.sa_norm(x), mask=mask, input_pos=input_pos, cache_pos=cache_pos
+        )
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = self.sa_scale(attn_out) + x
@@ -323,7 +331,9 @@ class TransformerDecoder(nn.Module):
         super().__init__()
         if num_layers is None:
             if isinstance(layers, nn.Module):
-                raise AssertionError("If num_layers is undefined, it is assumed that a list of layers is provided.")
+                raise AssertionError(
+                    "If num_layers is undefined, it is assumed that a list of layers is provided."
+                )
             layers = nn.ModuleList(layers)
         else:
             if not isinstance(layers, nn.Module):
@@ -340,7 +350,9 @@ class TransformerDecoder(nn.Module):
         self.head_dim = head_dim
         self._cache_max_seq_len = None
 
-    def setup_caches(self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None) -> None:
+    def setup_caches(
+        self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None
+    ) -> None:
         """Setup key value caches for attention calculation.
 
         Args:
@@ -349,10 +361,11 @@ class TransformerDecoder(nn.Module):
             max_seq_len (Optional[int]): maximum sequence length for the caches. Default None,
                 in which case ``model.max_seq_len`` is used.
         """
-        self.cache_max_seq_len = self.max_seq_len if max_seq_len is None else max_seq_len
+        self.cache_max_seq_len = (
+            self.max_seq_len if max_seq_len is None else max_seq_len
+        )
         for layer in self.layers:
             layer.setup_cache(batch_size, dtype, max_seq_len=self.cache_max_seq_len)
-
 
     def caches_are_enabled(self) -> bool:
         """Check if the key value caches are setup."""
@@ -361,7 +374,9 @@ class TransformerDecoder(nn.Module):
     def reset_caches(self):
         """Reset the key value caches."""
         if not self.caches_are_enabled():
-            raise RuntimeError("Key value caches are not setup. Call ``setup_caches()`` first.")
+            raise RuntimeError(
+                "Key value caches are not setup. Call ``setup_caches()`` first."
+            )
 
         for layer in self.layers:
             layer.reset_cache()
@@ -393,6 +408,10 @@ class TransformerDecoder(nn.Module):
                 of each token relative to its sample when packed, shape [b x s].
                 During inference, this indicates the position of the current token.
                 If none, assume the index of the token is its position id. Default is None.
+            cache_pos (Optional[Tensor]): Optional tensor which contains the cache positions
+                of each token, used during inference. This is useful when ``input_ids`` are
+                right-shifted to account for padding tokens. Default is None, in which case
+                ``input_pos`` is used (if specified).
 
         Note: At the very first step of inference, when the model is provided with a prompt,
         ``input_pos`` would contain the positions of all of the tokens in the prompt
@@ -415,7 +434,7 @@ class TransformerDecoder(nn.Module):
             will be``torch.arange(prompt_length)``. For a batch of varying-length prompts,
             shorter prompts are left-padded and position ids are correspondingly right-shifted,
             thus positional ids should be of shape ``[b, padded_prompt_length]``.
-            This is because we will need to retrieve the positional embeddings for each input id. 
+            This is because we will need to retrieve the positional embeddings for each input id.
             In the subsequent steps, if the model has been setup with KV-caches, ``input_pos`` will contain
             the position(s) of the current token(s) ``torch.tensor([padded_prompt_length])``. Otherwise,
             ``input_pos`` will contain all the position ids up to the current token.
@@ -439,7 +458,8 @@ class TransformerDecoder(nn.Module):
 
         if seq_len > self.max_seq_len:
             raise ValueError(
-                f"seq_len ({seq_len}) of input tensor should be smaller " f"than max_seq_len ({self.max_seq_len})"
+                f"seq_len ({seq_len}) of input tensor should be smaller "
+                f"than max_seq_len ({self.max_seq_len})"
             )
 
         # shape: [b, s, d]
@@ -454,9 +474,9 @@ class TransformerDecoder(nn.Module):
         #     # in most cases input_pos_len should be 1
         #     import pdb
 
-            # pdb.set_trace()
-            # mask = self.causal_mask[None, input_pos]
-            # pdb.set_trace()
+        # pdb.set_trace()
+        # mask = self.causal_mask[None, input_pos]
+        # pdb.set_trace()
 
         hidden = []
         for i, layer in enumerate(self.layers):
@@ -531,7 +551,9 @@ class TiedEmbeddingTransformerDecoder(nn.Module):
         super().__init__()
         if num_layers is None:
             if isinstance(layers, nn.Module):
-                raise AssertionError("If num_layers is undefined, it is assumed that a list of layers is provided.")
+                raise AssertionError(
+                    "If num_layers is undefined, it is assumed that a list of layers is provided."
+                )
             layers = nn.ModuleList(layers)
         else:
             if not isinstance(layers, nn.Module):
@@ -559,7 +581,9 @@ class TiedEmbeddingTransformerDecoder(nn.Module):
 
         # causal_mask is used during inference to ensure we're attending
         # to the right tokens
-        self.causal_mask = torch.tril(torch.ones(self.max_seq_len, self.max_seq_len, dtype=torch.bool))
+        self.causal_mask = torch.tril(
+            torch.ones(self.max_seq_len, self.max_seq_len, dtype=torch.bool)
+        )
 
     def caches_are_enabled(self) -> bool:
         """Check if the key value caches are setup."""
@@ -568,7 +592,9 @@ class TiedEmbeddingTransformerDecoder(nn.Module):
     def reset_caches(self):
         """Reset the key value caches."""
         if not self.caches_are_enabled():
-            raise RuntimeError("Key value caches are not setup. Call ``setup_caches()`` first.")
+            raise RuntimeError(
+                "Key value caches are not setup. Call ``setup_caches()`` first."
+            )
 
         for layer in self.layers:
             layer.reset_cache()
@@ -627,7 +653,8 @@ class TiedEmbeddingTransformerDecoder(nn.Module):
 
         if seq_len > self.max_seq_len:
             raise ValueError(
-                f"seq_len ({seq_len}) of input tensor should be smaller " f"than max_seq_len ({self.max_seq_len})"
+                f"seq_len ({seq_len}) of input tensor should be smaller "
+                f"than max_seq_len ({self.max_seq_len})"
             )
 
         # shape: [b, s, d]
@@ -635,9 +662,13 @@ class TiedEmbeddingTransformerDecoder(nn.Module):
 
         if self.causal_mask is not None:
             if input_pos is None:
-                raise ValueError("Caches are setup, but the position of input token is missing")
+                raise ValueError(
+                    "Caches are setup, but the position of input token is missing"
+                )
             if mask is not None:
-                raise ValueError("An attention mask was set. Cannot use a non-causal mask for inference")
+                raise ValueError(
+                    "An attention mask was set. Cannot use a non-causal mask for inference"
+                )
             # shape: [1, input_pos_len, m_s]
             # in most cases input_pos_len should be 1
             mask = self.causal_mask[None, input_pos]
