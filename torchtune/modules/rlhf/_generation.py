@@ -39,6 +39,7 @@ def generate_next_token_with_logits(
     input_pos: torch.Tensor,
     x: torch.Tensor,
     *,
+    cache_pos: Optional[torch.Tensor] = None,
     mask: Optional[torch.Tensor] = None,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
@@ -70,7 +71,7 @@ def generate_next_token_with_logits(
     # model produces logits in [bsz, seq_length, vocab_size]
     # we want to take the last token's logits as the input to the next model call
 
-    logits = model(x, input_pos=input_pos, mask=mask)
+    logits = model(x, input_pos=input_pos, mask=mask, cache_pos=cache_pos)
     return logits, sample(logits[:, -1].clone(), temperature, top_k, rng, q)
 
 
@@ -143,63 +144,52 @@ def generate_with_logits(
 
     bsz, prompt_length = prompt.size()
     generated_tokens = prompt.clone()
+    total_response_length = prompt_length + max_generated_tokens
+    incremental_decoding = model.caches_are_enabled()
+    padding_masks = generated_tokens != pad_id
+    masks = torch.tril(
+        torch.ones(
+            total_response_length,
+            total_response_length,
+            dtype=torch.bool,
+            device=prompt.device,
+        ).repeat(bsz, 1, 1)
+    )
 
-    padding_masks = generated_tokens == pad_id
-
-    if padding_masks.any():
-        # todo just create max length input pos and index in
-        prompt_masks = get_causal_mask(~padding_masks)
-        masks = torch.tril(
-            torch.ones(
-                prompt_length + max_generated_tokens,
-                prompt_length + max_generated_tokens,
-                dtype=torch.bool,
-                device=prompt.device,
-            ).repeat(bsz, 1, 1)
-        )
+    if not padding_masks.all():
+        prompt_masks = get_causal_mask(padding_masks)
         masks[:, :prompt_length, :prompt_length] = prompt_masks
-        masks[:, prompt_length:, :prompt_length] = prompt_masks[:, -1:, :]
-
-        input_pos = (~padding_masks).cumsum(-1) - (~padding_masks).int()
-        input_pos = input_pos.to(torch.int)
+        masks[:, prompt_length:, :prompt_length] = prompt_masks[:, -1:, :].clone()
+        input_pos = padding_masks.cumsum(-1) - 1
+        input_pos.masked_fill_(~padding_masks, 1)
         start_positions = input_pos.max(dim=-1, keepdim=False)[0]
         extended_input_pos = torch.stack(
             [
-                torch.arange(start_pos + 1, start_pos + max_generated_tokens, dtype=torch.int, device=prompt.device)
+                torch.arange(start_pos + 1, start_pos + max_generated_tokens, dtype=torch.long, device=prompt.device)
                 for start_pos in start_positions
             ]
         )
         input_pos = torch.hstack((input_pos, extended_input_pos)).contiguous()
+        cache_pos = torch.arange(0, total_response_length, device=generated_tokens.device)
     else:
-        masks = None
-        curr_masks = None
-        input_pos = torch.arange(
-            0, prompt_length + max_generated_tokens + 1, device=generated_tokens.device
-        ).unsqueeze(0)
-
-    incremental_decoding = model.caches_are_enabled()
+        input_pos = torch.arange(0, total_response_length, device=generated_tokens.device).unsqueeze(0)
+        cache_pos = None
 
     if incremental_decoding:
-        if masks is not None:
-            model.causal_mask = None
-            curr_masks = masks[:, :prompt_length, : input_pos[:, :prompt_length].max() + 1]
-        # curr_pos = input_pos[:, :prompt_length]
+        curr_masks = masks[:, :prompt_length]
     else:
-        if masks is not None:
-            curr_masks = masks[:, :prompt_length, :prompt_length]
-        curr_pos = input_pos[:, :prompt_length]
-        # curr_masks = None
+        cache_pos = None
+        curr_masks = masks[:, :prompt_length, :prompt_length]
 
-    import pdb
+    model.causal_mask = None
 
-    # pdb.set_trace()
     # lets grab the first tokens
     q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(1, generator=rng)
-
     _, tokens = generate_next_token_with_logits(
         model,
-        input_pos=input_pos[:, :prompt_length],
+        input_pos=input_pos[:, :prompt_length].squeeze(),
         mask=curr_masks,
+        cache_pos=cache_pos[:prompt_length] if cache_pos is not None else None,
         x=prompt,
         temperature=temperature,
         top_k=top_k,
@@ -211,31 +201,25 @@ def generate_with_logits(
     curr_pos = prompt_length
     import pdb
 
+    curr_cache_pos = None
     # pdb.set_trace()
     for i in range(max_generated_tokens - 1):
         if incremental_decoding:
             curr_input_pos = input_pos[:, curr_pos]
-            if curr_masks is not None:
-                # input_pos_expanded = curr_input_pos.unsqueeze(1).expand(-1, masks.shape[-1])
-                import pdb
+            curr_cache_pos = cache_pos[curr_pos].unsqueeze(0) if cache_pos is not None else None
+            import pdb
 
-                # pdb.set_trace()
-                # # Use advanced indexing to select rows from the mask
-                # curr_masks = torch.gather(
-                #     masks, 1, curr_input_pos.unsqueeze(1).expand(-1, masks.shape[-1], -1).to(torch.long)
-                # )
-                curr_masks = masks[:, curr_input_pos, : curr_input_pos.max() + 1]
-                # import pdb
-
-                # pdb.set_trace()
-                # curr_masks = masks[:, curr_input_pos, curr_input_pos]
+            # pdb.set_trace()
+            curr_masks = masks[:, curr_pos, None, :]
         else:
+
             curr_input_pos = input_pos[:, : curr_pos + 1]
             tokens = generated_tokens.clone()
-            if curr_masks is not None:
-                curr_masks = masks[:, : curr_pos + 1, : curr_pos + 1]
+            curr_masks = masks[:, : curr_pos + 1, : curr_pos + 1]
 
-        pdb.set_trace()
+        # print(i, prompt_length + i, curr_pos, curr_masks.shape, curr_input_pos)
+        # pdb.set_trace()
+        # print(curr_input_pos[:, -1], curr_masks[..., 37:curr_pos+1])
         q = torch.empty((bsz, model.tok_embeddings.num_embeddings), device=prompt.device).exponential_(
             1, generator=rng
         )
@@ -243,6 +227,7 @@ def generate_with_logits(
             model,
             input_pos=curr_input_pos,
             x=tokens,
+            cache_pos=curr_cache_pos,
             mask=curr_masks,
             temperature=temperature,
             top_k=top_k,

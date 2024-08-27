@@ -117,7 +117,7 @@ def generate(
     tokens = generate_next_token(
         model,
         input_pos=input_pos[:prompt_length],
-        x=prompt,
+         x=prompt,
         temperature=temperature,
         top_k=top_k,
     )
@@ -144,7 +144,7 @@ def generate(
         if incremental_decoding:
             curr_input_pos = input_pos[curr_pos].unsqueeze(0)
         else:
-            curr_input_pos = input_pos[: curr_pos + 1]
+            curr_input_pos = input_pos[ : curr_pos + 1]
             tokens = generated_tokens.clone()
 
         tokens = custom_generate_next_token(

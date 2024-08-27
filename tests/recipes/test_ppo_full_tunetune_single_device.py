@@ -47,6 +47,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
             "optimizer=torch.optim.AdamW",
             "optimizer.lr=2e-5",
             "log_every_n_steps=1",
+            "compile=False",
         ] + dummy_text_completion_alpaca_dataset_config()
 
     @pytest.mark.integration_test
@@ -93,18 +94,10 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
 
         reward_and_value_model_config = llama2_classifier_test_config()
         reward_and_value_model_config = [
-            k.replace("model.", "reward_and_value_model.")
-            for k in reward_and_value_model_config
+            k.replace("model.", "reward_and_value_model.") for k in reward_and_value_model_config
         ]
-        reward_and_value_model_config += [
-            "reward_and_value_model.intermediate_dim=null"
-        ]
-        cmd_1 = (
-            cmd_1
-            + self._get_test_config_overrides()
-            + model_config
-            + reward_and_value_model_config
-        )
+        reward_and_value_model_config += ["reward_and_value_model.intermediate_dim=null"]
+        cmd_1 = cmd_1 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
 
         monkeypatch.setattr(sys, "argv", cmd_1)
         with pytest.raises(SystemExit, match=""):
@@ -125,9 +118,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
             0.9231,
             0.9352,
         ]
-        torch.testing.assert_close(
-            loss_values, expected_loss_values, atol=1e-4, rtol=1e-5
-        )
+        torch.testing.assert_close(loss_values, expected_loss_values, atol=1e-4, rtol=1e-5)
 
     @pytest.mark.integration_test
     def test_training_state_on_resume(self, tmpdir, monkeypatch):
@@ -183,18 +174,10 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
 
         reward_and_value_model_config = llama2_classifier_test_config()
         reward_and_value_model_config = [
-            k.replace("model.", "reward_and_value_model.")
-            for k in reward_and_value_model_config
+            k.replace("model.", "reward_and_value_model.") for k in reward_and_value_model_config
         ]
-        reward_and_value_model_config += [
-            "reward_and_value_model.intermediate_dim=null"
-        ]
-        cmd_1 = (
-            cmd_1
-            + self._get_test_config_overrides()
-            + model_config
-            + reward_and_value_model_config
-        )
+        reward_and_value_model_config += ["reward_and_value_model.intermediate_dim=null"]
+        cmd_1 = cmd_1 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
 
         monkeypatch.setattr(sys, "argv", cmd_1)
         with pytest.raises(SystemExit, match=""):
@@ -231,12 +214,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
             metric_logger.filename={resumed_log_file} \
         """.split()
 
-        cmd_2 = (
-            cmd_2
-            + self._get_test_config_overrides()
-            + model_config
-            + reward_and_value_model_config
-        )
+        cmd_2 = cmd_2 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
 
         monkeypatch.setattr(sys, "argv", cmd_2)
         with pytest.raises(SystemExit, match=""):
@@ -245,9 +223,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
         resumed_loss_values = get_loss_values_from_metric_logger(resumed_log_file)
 
         # losses at each step are (loss, policy_loss, value_loss)
-        torch.testing.assert_close(
-            loss_values[6:], resumed_loss_values, rtol=1e-4, atol=1e-4
-        )
+        torch.testing.assert_close(loss_values[6:], resumed_loss_values, rtol=1e-4, atol=1e-4)
 
     @pytest.mark.integration_test
     def test_training_state_on_resume_with_optimizer_in_bwd(self, tmpdir, monkeypatch):
@@ -305,18 +281,10 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
 
         reward_and_value_model_config = llama2_classifier_test_config()
         reward_and_value_model_config = [
-            k.replace("model.", "reward_and_value_model.")
-            for k in reward_and_value_model_config
+            k.replace("model.", "reward_and_value_model.") for k in reward_and_value_model_config
         ]
-        reward_and_value_model_config += [
-            "reward_and_value_model.intermediate_dim=null"
-        ]
-        cmd_1 = (
-            cmd_1
-            + self._get_test_config_overrides()
-            + model_config
-            + reward_and_value_model_config
-        )
+        reward_and_value_model_config += ["reward_and_value_model.intermediate_dim=null"]
+        cmd_1 = cmd_1 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
 
         monkeypatch.setattr(sys, "argv", cmd_1)
         with pytest.raises(SystemExit, match=""):
@@ -355,12 +323,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
             optimizer_in_bwd=True
         """.split()
 
-        cmd_2 = (
-            cmd_2
-            + self._get_test_config_overrides()
-            + model_config
-            + reward_and_value_model_config
-        )
+        cmd_2 = cmd_2 + self._get_test_config_overrides() + model_config + reward_and_value_model_config
 
         monkeypatch.setattr(sys, "argv", cmd_2)
         with pytest.raises(SystemExit, match=""):
@@ -369,6 +332,4 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
         resumed_loss_values = get_loss_values_from_metric_logger(resumed_log_file)
 
         # losses at each step are (loss, policy_loss, value_loss)
-        torch.testing.assert_close(
-            loss_values[6:], resumed_loss_values, rtol=1e-4, atol=1e-4
-        )
+        torch.testing.assert_close(loss_values[6:], resumed_loss_values, rtol=1e-4, atol=1e-4)

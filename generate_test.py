@@ -7,10 +7,10 @@ import time
 import sys
 
 args = sys.argv
-
+temperature = 0.8
 torch.manual_seed(42)
 device = torch.device("cuda")
-dtype = torch.float32
+dtype = torch.float16
 with utils.set_default_dtype(dtype), device:
     model = llama2(
         vocab_size=32000, num_layers=22, num_heads=32, embed_dim=2048, max_seq_len=2048, norm_eps=1e-5, num_kv_heads=4
@@ -48,14 +48,27 @@ Alarum, as in battle. Enter MARCIUS and AUFIDIUS at several doors
     Not Afric owns a serpent I abhor
     More than thy fame and envy. Fix thy foot.
   MARCIUS. Let the first budger die the other's slave,
-    And the gods doom him after!
+    And the gods doom him after!"""
+
+expected_outputs = """
+SCENE VIII.
+A field of battle between the Roman and the Volscian camps
+
+Alarum, as in battle. Enter MARCIUS and AUFIDIUS at several doors
+^
+  MARCIUS. I'll fight with none but thee, for I do hate thee
+    Worse than a promise-breaker.
+  AUFIDIUS. We hate alike:
+    Not Afric owns a serpent I abhor
+    More than thy fame and envy. Fix thy foot.
+  MARCIUS. Let the first budger die the other's slave,
+    And the gods doom him after! There are reasons:
+    I pray but thee to let the next to let live;
+    Think thou it but a Satyre's liking
 """
 
-batch_size = 1
-max_generated_tokens = 32
-with device:
-    model.setup_caches(batch_size=batch_size, dtype=dtype)
-
+batch_size = 4
+max_generated_tokens = 256
 prompt = torch.tensor(tokenizer.encode(prompt, add_eos=False), dtype=torch.int, device=device).repeat(batch_size, 1)
 prompt = torch.hstack(
     (torch.ones(batch_size, prompt.shape[-1] // 4, device=device, dtype=torch.int) * tokenizer.pad_id, prompt)
@@ -63,10 +76,20 @@ prompt = torch.hstack(
 # prompt[0][: prompt.shape[-1] // 4] = tokenizer.pad_id
 
 # ['cudagraphs', 'inductor', 'onnxrt', 'openxla', 'tvm']
+
+with device:
+    model.setup_caches(batch_size=batch_size, dtype=dtype)#, max_seq_len=prompt.shape[-1] + max_generated_tokens)
+
 import logging
 
 torch._logging.set_logs(
-    dynamo=logging.WARNING, inductor=logging.WARNING, recompiles=True, graph_breaks=True, guards=False, cudagraphs=True
+    dynamo=logging.WARNING,
+    inductor=logging.WARNING,
+    recompiles=True,
+    recompiles_verbose=True,
+    graph_breaks=True,
+    guards=False,
+    cudagraphs=False,
 )
 
 
@@ -77,21 +100,21 @@ def generate_with_compile():
     utils.generate(
         model=model,
         prompt=prompt,
-        max_generated_tokens=2,
-        temperature=1.0,
+        max_generated_tokens=max_generated_tokens,
+        temperature=temperature,
         top_k=None,
         stop_tokens=None,
         custom_generate_next_token=custom_generate_next_token,
     )
     t_comp = time.perf_counter() - t0_comp
     print(f"Time for warmup: {t_comp:.02f} sec")
-
+    model.reset_caches()
     t0 = time.perf_counter()
     outputs = utils.generate(
         model=model,
         prompt=prompt,
         max_generated_tokens=max_generated_tokens,
-        temperature=1.0,
+        temperature=temperature,
         top_k=None,
         stop_tokens=None,
         custom_generate_next_token=custom_generate_next_token,
@@ -106,7 +129,7 @@ def generate():
         model=model,
         prompt=prompt,
         max_generated_tokens=max_generated_tokens,
-        temperature=1.0,
+        temperature=temperature,
         top_k=None,
         stop_tokens=None,
         custom_generate_next_token=None,
@@ -117,10 +140,14 @@ def generate():
 
 def generate_rlhf():
     rng = torch.Generator(prompt.device)
-    rng.manual_seed(42)
     t0 = time.perf_counter()
     generated_tokens, _ = rlhf.generate_with_logits(
-        model=model, prompt=prompt, max_generated_tokens=max_generated_tokens, temperature=1.0, top_k=None, rng=rng
+        model=model,
+        prompt=prompt,
+        max_generated_tokens=max_generated_tokens,
+        temperature=temperature,
+        top_k=None,
+        rng=rng,
     )
     t = time.perf_counter() - t0
     return generated_tokens.tolist(), t
@@ -128,18 +155,22 @@ def generate_rlhf():
 
 def generate_rlhf_with_compile():
     rng = torch.Generator(prompt.device)
+
     rng.manual_seed(42)
     custom_generate_next_token = torch.compile(
         rlhf.generate_next_token_with_logits, fullgraph=True, backend="inductor"
     )
     print("Warmup run!")
+    model.reset_caches()
     t0_comp = time.perf_counter()
-    torch.compiler.cudagraph_mark_step_begin()
+    # torch.compiler.cudagraph_mark_step_begin()
+
+    torch.manual_seed(42)
     rlhf.generate_with_logits(
         model=model,
         prompt=prompt,
-        max_generated_tokens=2,
-        temperature=1.0,
+        max_generated_tokens=max_generated_tokens,
+        temperature=temperature,
         top_k=None,
         custom_generate_next_token_with_logits=custom_generate_next_token,
         rng=rng,
@@ -166,7 +197,7 @@ def generate_rlhf_with_compile():
         model=model,
         prompt=prompt,
         max_generated_tokens=max_generated_tokens,
-        temperature=1.0,
+        temperature=temperature,
         top_k=None,
         custom_generate_next_token_with_logits=custom_generate_next_token,
         rng=rng,
@@ -175,7 +206,7 @@ def generate_rlhf_with_compile():
     return outputs.tolist(), t
 
 
-with torch.no_grad():
+with torch.no_grad(), torch.inference_mode():
     if len(sys.argv) > 1:
         if sys.argv[1] == "compile":
             generated_tokens, t = generate_with_compile()
@@ -186,8 +217,12 @@ with torch.no_grad():
     else:
         generated_tokens, t = generate()
 
-print(f"Output:\n {tokenizer.decode(generated_tokens[0])}")
-tokens_generated = len(generated_tokens[0]) - prompt.size(0)
+generated_tokens = torch.tensor(generated_tokens)
+
+print(f"Output:\n {tokenizer.decode(generated_tokens[0].tolist())}")
+tokens_generated = generated_tokens[
+    :, prompt.shape[-1] :
+].numel()  # (len(generated_tokens[0]) - prompt.size(0)) * batch_size
 tokens_sec = tokens_generated / t
 model_size = sum([p.numel() * p.dtype.itemsize for p in itertools.chain(model.parameters(), model.buffers())])
 

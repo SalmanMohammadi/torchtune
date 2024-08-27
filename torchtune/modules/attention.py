@@ -130,7 +130,7 @@ class MultiHeadAttention(nn.Module):
         self.k_norm = k_norm
         self.pos_embeddings = pos_embeddings
 
-    def setup_cache(self, batch_size: int, dtype: torch.dtype) -> None:
+    def setup_cache(self, batch_size: int, dtype: torch.dtype, max_seq_len: int = None) -> None:
         """Setup key value caches for attention calculation. If called
         after kv_cache is already setup, this will be skipped.
 
@@ -144,7 +144,7 @@ class MultiHeadAttention(nn.Module):
         else:
             self.kv_cache = KVCache(
                 batch_size=batch_size,
-                max_seq_len=self.max_seq_len,
+                max_seq_len=self.max_seq_len if max_seq_len is None else max_seq_len,
                 num_heads=self.num_heads,
                 head_dim=self.head_dim,
                 dtype=dtype,
@@ -163,6 +163,7 @@ class MultiHeadAttention(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
+        cache_pos: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Args:
@@ -199,8 +200,8 @@ class MultiHeadAttention(nn.Module):
         b, s_x, _ = x.shape
         y = y if y is not None else x
         s_y = y.shape[1]
-
-        if self.kv_cache and input_pos is None:
+        cache_pos = input_pos if cache_pos is None else cache_pos
+        if self.kv_cache and cache_pos is None:
             cache_size = self.kv_cache.size
             input_pos = torch.arange(cache_size, cache_size + s_y, device=x.device)
 
@@ -251,17 +252,26 @@ class MultiHeadAttention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
+        # shape: [b, 1, s, s]
+
         # Update key-value cache
         if self.kv_cache is not None:
-            k, v = self.kv_cache.update(input_pos, k, v)
+            k, v = self.kv_cache.update(cache_pos, k, v)
+            # if mask is not None:
+            # import pdb
 
-        # shape: [b, 1, s, s]
-        # if mask is not None:
-        #     # mask = mask[None, :, :]
+            # pdb.set_trace()
+            # mask = torch.nn.functional.pad(mask, (0, self.max_seq_len - s_x))
 
+        if mask is not None:
+            mask = mask[:, None, :, :]
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
         import pdb
 
+        # print(mask.shape)
+        # if mask.shape[-2] == 1:
+        #     pdb.set_trace()
+        #     print(mask[:, :, :, :5], q.shape, mask.shape)
         # pdb.set_trace()
         output = nn.functional.scaled_dot_product_attention(
             q,

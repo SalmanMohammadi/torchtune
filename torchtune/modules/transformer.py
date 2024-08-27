@@ -43,14 +43,16 @@ class TransformerSelfAttentionLayer(nn.Module):
         self.sa_scale = sa_scale or nn.Identity()
         self.mlp_scale = mlp_scale or nn.Identity()
 
-    def setup_cache(self, batch_size: int, dtype: torch.dtype) -> None:
+    def setup_cache(self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None) -> None:
         """Setup key value caches for attention calculation.
 
         Args:
             batch_size (int): batch size for the caches.
             dtype (torch.dtype): dtype for the caches.
+            max_seq_len (Optional[int]): maximum sequence length for the caches. Default None,
+                in which case ``model.max_seq_len`` is used.
         """
-        self.attn.setup_cache(batch_size, dtype)
+        self.attn.setup_cache(batch_size, dtype, max_seq_len=max_seq_len)
 
     @property
     def cache_enabled(self) -> bool:
@@ -67,6 +69,7 @@ class TransformerSelfAttentionLayer(nn.Module):
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
+        cache_pos: Optional[Tensor] = None,
         **kwargs: Dict,
     ) -> Tensor:
         """
@@ -96,7 +99,7 @@ class TransformerSelfAttentionLayer(nn.Module):
         # Input tensor and attention output have the same shape
         # [b, s, d]
         # Norm applied before self-attention
-        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos)
+        attn_out = self.attn(self.sa_norm(x), mask=mask, input_pos=input_pos, cache_pos=cache_pos)
 
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = self.sa_scale(attn_out) + x
@@ -337,15 +340,17 @@ class TransformerDecoder(nn.Module):
         self.head_dim = head_dim
         self.causal_mask = None
 
-    def setup_caches(self, batch_size: int, dtype: torch.dtype) -> None:
+    def setup_caches(self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None) -> None:
         """Setup key value caches for attention calculation.
 
         Args:
             batch_size (int): batch size for the caches.
             dtype (torch.dtype): dtype for the caches.
+            max_seq_len (Optional[int]): maximum sequence length for the caches. Default None,
+                in which case ``model.max_seq_len`` is used.
         """
         for layer in self.layers:
-            layer.setup_cache(batch_size, dtype)
+            layer.setup_cache(batch_size, dtype, max_seq_len=max_seq_len)
 
         # causal_mask is used during inference to ensure we're attending
         # to the right tokens
@@ -371,6 +376,7 @@ class TransformerDecoder(nn.Module):
         encoder_input: Optional[Tensor] = None,
         encoder_mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
+        cache_pos: Optional[Tensor] = None,
     ) -> Union[Tensor, List[Tensor]]:
         """
         Args:
@@ -431,7 +437,11 @@ class TransformerDecoder(nn.Module):
                 raise ValueError("An attention mask was set. Cannot use a non-causal mask for inference")
             # shape: [1, input_pos_len, m_s]
             # in most cases input_pos_len should be 1
+            import pdb
+
+            # pdb.set_trace()
             mask = self.causal_mask[None, input_pos]
+            # pdb.set_trace()
 
         hidden = []
         for i, layer in enumerate(self.layers):
@@ -444,6 +454,7 @@ class TransformerDecoder(nn.Module):
                 encoder_input=encoder_input,
                 encoder_mask=encoder_mask,
                 input_pos=input_pos,
+                cache_pos=cache_pos,
             )
 
         # shape: [b, s, d]
