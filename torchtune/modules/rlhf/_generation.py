@@ -115,7 +115,7 @@ def get_causal_mask_from_padding_mask(
         >>>     [False, True,  False, False, False],
         >>>     [False, True,  True,  False, False],
         >>>     [False, True,  True,  True,  False],
-        >>>     [False, True,  True,  True,  False]
+        >>>     [False, True,  True,  True,  True]
         >>> ])
     """
     bsz, seq_len = padding_mask.shape
@@ -130,7 +130,7 @@ def get_causal_mask_from_padding_mask(
         torch.ones(seq_len, target_seq_len, device=padding_mask.device, dtype=bool),
         diagonal=0,
     ).repeat(bsz, 1, 1)
-    mask[:, :, :seq_len] *= padding_mask[:, None, :].expand(-1, seq_len, -1)
+    mask.narrow(2, 0, seq_len).mul_(padding_mask[:, None, :].expand(-1, seq_len, -1))
     mask.diagonal(dim1=1, dim2=2).copy_(True)
     return mask
 
@@ -216,6 +216,7 @@ def generate_with_logits(
         total_response_length if not incremental_decoding else model.cache_max_seq_len
     )
     padding_masks = generated_tokens != pad_id
+    cache_pos = None
 
     if not padding_masks.all():
         padding_masks = torch.nn.functional.pad(
@@ -240,14 +241,12 @@ def generate_with_logits(
         input_pos = torch.arange(
             0, total_response_length, device=generated_tokens.device
         ).unsqueeze(0)
-        cache_pos = None
 
     del padding_masks
 
     if incremental_decoding:
         curr_masks = masks[:, :prompt_length]
     else:
-        cache_pos = None
         curr_masks = masks[:, :prompt_length, :prompt_length]
 
     q = torch.empty(
