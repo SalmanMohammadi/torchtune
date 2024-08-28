@@ -35,11 +35,8 @@ class InferenceRecipe:
     """
 
     def __init__(self, cfg: DictConfig) -> None:
-
-        self._device = torch.device("mps")
-        self._dtype = torch.bfloat16
-        # self._device = utils.get_device(device=cfg.device)
-        # self._dtype = utils.get_dtype(dtype=cfg.dtype, device=self._device)
+        self._device = utils.get_device(device=cfg.device)
+        self._dtype = utils.get_dtype(dtype=cfg.dtype, device=self._device)
         self._quantizer = config.instantiate(cfg.quantizer)
         self._quantization_mode = utils.get_quantizer_mode(self._quantizer)
 
@@ -141,9 +138,7 @@ class InferenceRecipe:
         )
         prompt = torch.tensor(tokens, dtype=torch.int, device=self._device)
 
-        custom_generate_next_token = torch.compile(
-            utils.generate_next_token, fullgraph=True, backend="aot_eager"
-        )
+        custom_generate_next_token = None
 
         # since quantized model uses torch.compile to get speedup, it needs a warm up / prefill run
         # to get the accurate performance measurement
@@ -172,7 +167,7 @@ class InferenceRecipe:
             max_generated_tokens=cfg.max_new_tokens,
             temperature=cfg.temperature,
             top_k=cfg.top_k,
-            stop_tokens=None,
+            stop_tokens=self._tokenizer.stop_tokens,
             custom_generate_next_token=custom_generate_next_token,
         )
         t = time.perf_counter() - t0

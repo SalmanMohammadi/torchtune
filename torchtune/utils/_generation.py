@@ -119,7 +119,6 @@ def generate(
 
     # generate the first tokens conditioned on the prompt
     input_pos = torch.arange(0, model.max_seq_len, device=prompt.device)
-
     tokens = generate_next_token(
         model,
         input_pos=input_pos[:prompt_length],
