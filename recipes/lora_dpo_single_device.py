@@ -324,7 +324,7 @@ class LoRADPORecipeSingleDevice(FTRecipeInterface):
         if opt_state_dict:
             optimizer.load_state_dict(opt_state_dict)
 
-        log.info("Optimizer and loss are initialized.")
+        log.info("Optimizer is initialized.")
         return optimizer
 
     def _setup_lr_scheduler(
