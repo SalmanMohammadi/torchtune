@@ -6,13 +6,13 @@
 
 import contextlib
 from typing import Any, Dict, Generator, List, Literal, Optional, Protocol, Set, NamedTuple
-
 import torch
 from torch import nn
 from omegaconf import DictConfig, ListConfig
 
 # Modules from MultiHeadAttention that LoRA can be applied to
 LORA_ATTN_MODULES = Literal["q_proj", "k_proj", "v_proj", "output_proj"]
+
 
 class ModelPEFTConfig(NamedTuple):
     lora_rank: int
@@ -22,6 +22,19 @@ class ModelPEFTConfig(NamedTuple):
     apply_lora_to_output: bool
     adapter_params: Dict[str, nn.Parameter]
     is_dora: bool
+
+    def to_checkpoint_adapter_config(self):
+        return {
+            "r": self.lora_rank,
+            "lora_alpha": self.lora_alpha,
+            "target_modules": get_lora_module_names(
+                self.lora_attn_modules,
+                self.apply_lora_to_mlp,
+                self.apply_lora_to_output,
+            ),
+            "peft_type": "LORA",
+        }
+
 
 class AdapterModule(Protocol):
     """
@@ -65,9 +78,7 @@ def get_adapter_params(model: nn.Module) -> Dict[str, nn.Parameter]:
                     full_key = f"{k}.{n}" if k else n
                     adapter_params.update({full_key: p})
                     current_adapter_params.remove(n)
-            assert (
-                current_adapter_params == []
-            ), f"Adapter params {current_adapter_params} not converted"
+            assert current_adapter_params == [], f"Adapter params {current_adapter_params} not converted"
     return adapter_params
 
 
@@ -158,22 +169,15 @@ def validate_state_dict_for_lora(
         AssertionError: If full model state dict is missing keys from either base model or LoRA state dict.
 
     """
-    lora_modules = get_lora_module_names(
-        lora_attn_modules, apply_lora_to_mlp, apply_lora_to_output
-    )
+    lora_modules = get_lora_module_names(lora_attn_modules, apply_lora_to_mlp, apply_lora_to_output)
     is_lora_param = lambda x: any(
-        [
-            ".".join([k, "lora"]) in x or ".".join([k, "magnitude"]) in x
-            for k in lora_modules
-        ]
+        [".".join([k, "lora"]) in x or ".".join([k, "magnitude"]) in x for k in lora_modules]
     )
     for k in full_model_state_dict_keys:
         if not is_lora_param(k):
             if base_model_state_dict_keys is not None:
                 if k not in base_model_state_dict_keys:
-                    raise AssertionError(
-                        f"Missing non-LoRA key {k} from base model state dict"
-                    )
+                    raise AssertionError(f"Missing non-LoRA key {k} from base model state dict")
             if lora_state_dict_keys is not None:
                 if k in lora_state_dict_keys:
                     raise AssertionError(f"Non-LoRA key {k} found in LoRA state dict")
@@ -187,18 +191,10 @@ def validate_state_dict_for_lora(
 
     # Full model is disjoint union of base model and LoRA weights
     if lora_state_dict_keys is not None and base_model_state_dict_keys is not None:
-        combined_state_dict_keys = set(lora_state_dict_keys).union(
-            base_model_state_dict_keys
-        )
-        shared_state_dict_keys = set(lora_state_dict_keys).intersection(
-            base_model_state_dict_keys
-        )
-        assert (
-            shared_state_dict_keys == set()
-        ), "Base model and LoRA state dict have overlapping keys"
-        assert combined_state_dict_keys == set(
-            full_model_state_dict_keys
-        ), "Extra keys not present in full model"
+        combined_state_dict_keys = set(lora_state_dict_keys).union(base_model_state_dict_keys)
+        shared_state_dict_keys = set(lora_state_dict_keys).intersection(base_model_state_dict_keys)
+        assert shared_state_dict_keys == set(), "Base model and LoRA state dict have overlapping keys"
+        assert combined_state_dict_keys == set(full_model_state_dict_keys), "Extra keys not present in full model"
 
 
 def _get_lora_modules(state_dict: Dict[str, Any]) -> Set[str]:
@@ -217,12 +213,7 @@ def _get_lora_modules(state_dict: Dict[str, Any]) -> Set[str]:
     """
     lora_keys = [k for k in state_dict.keys() if "lora" in k or "magnitude" in k]
     return set(
-        [
-            k.replace(".lora_a.weight", "")
-            .replace(".lora_b.weight", "")
-            .replace(".magnitude", "")
-            for k in lora_keys
-        ]
+        [k.replace(".lora_a.weight", "").replace(".lora_b.weight", "").replace(".magnitude", "") for k in lora_keys]
     )
 
 
@@ -294,21 +285,13 @@ def disable_adapter(model: nn.Module) -> Generator[None, None, None]:
 
     """
     for _, module in model.named_modules():
-        if (
-            hasattr(module, "adapter_params")
-            and callable(module.adapter_params)
-            and hasattr(module, "disabled")
-        ):
+        if hasattr(module, "adapter_params") and callable(module.adapter_params) and hasattr(module, "disabled"):
             module.disabled = True
     try:
         yield
     finally:
         for _, module in model.named_modules():
-            if (
-                hasattr(module, "adapter_params")
-                and callable(module.adapter_params)
-                and hasattr(module, "disabled")
-            ):
+            if hasattr(module, "adapter_params") and callable(module.adapter_params) and hasattr(module, "disabled"):
                 module.disabled = False
 
 
@@ -356,14 +339,9 @@ def validate_missing_and_unexpected_for_lora(
         AssertionError: if lora_missing contains any LoRA keys.
         AssertionError: if lora_unexpected is nonempty.
     """
-    lora_modules = get_lora_module_names(
-        lora_attn_modules, apply_lora_to_mlp, apply_lora_to_output
-    )
+    lora_modules = get_lora_module_names(lora_attn_modules, apply_lora_to_mlp, apply_lora_to_output)
     is_lora_param = lambda x: any(
-        [
-            ".".join([k, "lora"]) in x or ".".join([k, "magnitude"]) in x
-            for k in lora_modules
-        ]
+        [".".join([k, "lora"]) in x or ".".join([k, "magnitude"]) in x for k in lora_modules]
     )
 
     if base_missing:
@@ -384,14 +362,12 @@ def load_dora_magnitudes(model: nn.Module) -> None:
     """
     For DoRA magnitude we use setattr to move from meta device
     """
-    dora_parents = {
-        n: p for n, p in model.named_modules() if hasattr(p, "adapter_params")
-    }
+    dora_parents = {n: p for n, p in model.named_modules() if hasattr(p, "adapter_params")}
     sd = {f"{n}.magnitude": p.magnitude for n, p in dora_parents.items()}
     model.load_state_dict(sd, strict=False, assign=True)
 
-def setup_model_peft_config(model: nn.Module, cfg_model: DictConfig) -> ModelPEFTConfig:
 
+def setup_model_peft_config(model: nn.Module, cfg_model: DictConfig) -> ModelPEFTConfig:
     adapter_params = get_adapter_params(model)
     set_trainable_params(model, adapter_params)
     return ModelPEFTConfig(
@@ -403,4 +379,26 @@ def setup_model_peft_config(model: nn.Module, cfg_model: DictConfig) -> ModelPEF
         adapter_params=adapter_params,
         is_dora=any(["magnitude" in k for k in adapter_params.keys()]),
     )
-    
+
+
+def validate_load_model_peft_checkpoint(
+    model, base_model_state_dict, model_peft_config: ModelPEFTConfig, lora_weights_state_dict=None
+):
+    base_missing, base_unexpected = model.load_state_dict(base_model_state_dict, strict=False)
+    # This is for any adapters that need to be initialized after base weights
+    # have been loaded (e.g. DoRA).
+    if model_peft_config.is_dora:
+        load_dora_magnitudes(model)
+    if lora_weights_state_dict:
+        lora_missing, lora_unexpected = model.load_state_dict(lora_weights_state_dict, strict=False)
+    else:
+        lora_missing, lora_unexpected = None, None
+    validate_missing_and_unexpected_for_lora(
+        lora_attn_modules=model_peft_config.lora_attn_modules,
+        apply_lora_to_mlp=model_peft_config.apply_lora_to_mlp,
+        apply_lora_to_output=model_peft_config.apply_lora_to_output,
+        base_missing=base_missing,
+        base_unexpected=base_unexpected,
+        lora_missing=lora_missing,
+        lora_unexpected=lora_unexpected,
+    )

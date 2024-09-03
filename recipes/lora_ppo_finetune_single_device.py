@@ -33,7 +33,8 @@ from torchtune.modules.peft import (
     validate_state_dict_for_lora,
     ModelPEFTConfig,
 )
-from torchtune.modules.peft._utils import setup_model_peft_config
+import time
+from torchtune.modules.peft._utils import setup_model_peft_config, validate_load_model_peft_checkpoint
 
 log = utils.get_logger("DEBUG")
 
@@ -143,6 +144,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # Training cfg
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
+        self._save_adapter_weights_only = cfg.get("save_adapter_weights_only", False)
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
 
     def setup(self, cfg: DictConfig) -> None:
@@ -165,25 +167,29 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         # load policy checkpoints
-        policy_model_checkpoint_dict = self._policy_checkpointer.load_checkpoint()
-
-        # load reward and value model checkpoints
-        reward_model_state_dict = self._reward_checkpointer.load_checkpoint()
+        policy_model_checkpoint_dict, reward_value_model_state_dict = self.load_checkpoints()
 
         # update recipe state
         # ``_setup_model`` handles initialization and loading the state dict. This method
         # should be called before ``_setup_optimizer`` since transforming the optimizer
+        if self._resume_from_checkpoint:
+            lora_weights_policy_state_dict = policy_model_checkpoint_dict[training.ADAPTER_KEY]
+            lora_weights_reward_value_model_state_dict = reward_value_model_state_dict[training.ADAPTER_KEY]
+        else:
+            lora_weights_policy_state_dict = None
+            lora_weights_reward_value_model_state_dict = None
+
         # state dict requires the model
         self._model_compile = cfg.compile
         (self._policy_model, self._reward_value_model) = self._setup_models(
-            cfg_model=cfg.policy_model,
-            cfg_reward_value_model=cfg.reward_and_value_model,
+            cfg_policy=cfg.policy_model,
+            cfg_reward_value_model=cfg.reward_value_model,
             enable_activation_checkpointing=cfg.enable_activation_checkpointing,
             compile_model=cfg.compile,
             base_policy_state_dict=policy_model_checkpoint_dict[training.MODEL_KEY],
-            base_reward_model_state_dict=reward_model_state_dict[training.MODEL_KEY],
-            lora_weights_policy_state_dict=policy_model_checkpoint_dict[training.ADAPTER_KEY],
-            lora_weights_reward_model_state_dict=reward_model_state_dict[training.ADAPTER_KEY],
+            base_reward_value_model_state_dict=reward_value_model_state_dict[training.MODEL_KEY],
+            lora_weights_policy_state_dict=lora_weights_policy_state_dict,
+            lora_weights_reward_value_model_state_dict=lora_weights_reward_value_model_state_dict,
         )
 
         # setup tokenizer
@@ -194,7 +200,6 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         # checkpoint. Transforming the opt state dict is handled by this method
         self._optimizer = self._setup_optimizer(
             cfg_optimizer=cfg.optimizer,
-            optimizer_in_bwd=cfg.optimizer_in_bwd,
             opt_state_dict=(policy_model_checkpoint_dict[training.OPT_KEY] if self._resume_from_checkpoint else None),
         )
 
@@ -211,9 +216,6 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         self._setup_training_parameters(cfg)
         self._setup_training_hyperparameters(cfg)
-
-        if self._resume_from_checkpoint:
-            self._update_recipe_state(policy_model_checkpoint_dict)
 
         # one "step" is a single gradient update update over a minibatch of trajectories
         self.global_step = self._steps_run * self._ppo_epochs * (self.batch_size // self._ppo_batch_size)
@@ -295,12 +297,6 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
                 f"by gradient_accumulation_steps ({self._gradient_accumulation_steps})."
             )
 
-        if self._gradient_accumulation_steps > 1 and self._optimizer_in_bwd:
-            raise RuntimeError(
-                "Gradient accumulation is not supported with optimizer in bwd."
-                "Please set gradient_accumulation_steps=1, or optimizer_in_bwd=False."
-            )
-
         self._total_steps = cfg.num_steps // self.batch_size
         batches_per_epoch = max(1, len(self._dataloader))  # when we only have a single batch in the dataset
 
@@ -351,51 +347,52 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             reward_checkpointer,
         )
 
-    def _validate_load_model_peft_checkpoint(
-        self, model, base_model_state_dict, model_peft_config, lora_weights_state_dict=None
-    ):
-        base_missing, base_unexpected = model.load_state_dict(base_model_state_dict, strict=False)
-        # This is for any adapters that need to be initialized after base weights
-        # have been loaded (e.g. DoRA).
-        if model_peft_config.is_dora:
-            load_dora_magnitudes(model)
-        if lora_weights_state_dict:
-            lora_missing, lora_unexpected = model.load_state_dict(lora_weights_state_dict, strict=False)
-        else:
-            lora_missing, lora_unexpected = None, None
-        validate_missing_and_unexpected_for_lora(
-            lora_attn_modules=model_peft_config.lora_attn_modules,
-            apply_lora_to_mlp=model_peft_config.apply_lora_to_mlp,
-            apply_lora_to_output=model_peft_config.apply_lora_to_output,
-            base_missing=base_missing,
-            base_unexpected=base_unexpected,
-            lora_missing=lora_missing,
-            lora_unexpected=lora_unexpected,
-        )
-        # Validate model adapter params were loaded in with the expected dtype
-        # TODO (rohan-varma): Further validation to ensure the appropriate base params
-        # are NF4 vs bf16 based on the quantization config.
-        training.validate_expected_param_dtype(model_peft_config.adapter_params.items(), dtype=self._dtype)
+    def load_checkpoints(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Extract the checkpoint state from file and validate. This includes the
+        base model weights. If resume_from_checkpoint is True, this also includes
+        the adapter weights and recipe state
+        """
+
+        policy_model_checkpoint_dict = self._policy_checkpointer.load_checkpoint()
+        reward_model_checkpoint_dict = self._reward_checkpointer.load_checkpoint()
+
+        if self._resume_from_checkpoint:
+            if training.ADAPTER_KEY not in policy_model_checkpoint_dict:
+                raise ValueError(
+                    "Adapter weights not found in policy model checkpoint dict. Please ensure a valid adapter checkpoint is provided."
+                )
+            # _update_recipe_state will throw an exception if the recipe state is not corrctly loaded
+            # no need to check here
+            self._update_recipe_state(policy_model_checkpoint_dict)
+
+            if training.ADAPTER_KEY not in reward_model_checkpoint_dict:
+                raise ValueError(
+                    "Adapter weights not found in reward/value model checkpoint dict. Please ensure a valid adapter checkpoint is provided."
+                )
+
+        return policy_model_checkpoint_dict, reward_model_checkpoint_dict
 
     def _setup_models(
         self,
-        cfg_model: DictConfig,
+        cfg_policy: DictConfig,
         cfg_reward_value_model: DictConfig,
         enable_activation_checkpointing: bool,
-        policy_state_dict: Dict[str, Any],
-        reward_model_state_dict: Dict[str, Any],
-        model_lora_weights_state_dict: Optional[Dict[str, Any]] = None,
-        reward_model_lora_weights_state_dict: Optional[Dict[str, Any]] = None,
+        compile_model: bool,
+        base_policy_state_dict: Dict[str, Any],
+        base_reward_value_model_state_dict: Dict[str, Any],
+        lora_weights_policy_state_dict: Optional[Dict[str, Any]] = None,
+        lora_weights_reward_value_model_state_dict: Optional[Dict[str, Any]] = None,
     ) -> Tuple[nn.Module, nn.Module]:
         """
         Sets up the policy model, reference policy model, reward model, and value model.
         """
 
         with training.set_default_dtype(self._dtype), self._device:
-            policy_model = config.instantiate(cfg_model)
+            policy_model = config.instantiate(cfg_policy)
             reward_value_model = config.instantiate(cfg_reward_value_model)
 
-        self._policy_peft_config = setup_model_peft_config(policy_model, cfg_model)
+        self._policy_peft_config = setup_model_peft_config(policy_model, cfg_policy)
         self._reward_value_model_peft_config = setup_model_peft_config(reward_value_model, cfg_reward_value_model)
 
         if enable_activation_checkpointing:
@@ -408,14 +405,29 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         # a classifier model, this function should just ensure
         # output.weight appears in the state_dict and the model's parameters,
         # and removes output.bias from the state dict if found
-        training.update_state_dict_for_classifier(reward_model_state_dict, reward_value_model.named_parameters())
-
-        # Validate models were loaded in with the expected dtype.
-        self._validate_load_model_peft_checkpoint(
-            policy_model, policy_state_dict, lora_weights_state_dict=model_lora_weights_state_dict
+        training.update_state_dict_for_classifier(
+            base_reward_value_model_state_dict, reward_value_model.named_parameters()
         )
-        self._validate_load_model_peft_checkpoint(
-            reward_value_model, policy_state_dict, lora_weights_state_dict=reward_model_lora_weights_state_dict
+
+        validate_load_model_peft_checkpoint(
+            policy_model,
+            base_policy_state_dict,
+            self._policy_peft_config,
+            lora_weights_state_dict=lora_weights_policy_state_dict,
+        )
+        validate_load_model_peft_checkpoint(
+            reward_value_model,
+            base_reward_value_model_state_dict,
+            self._reward_value_model_peft_config,
+            lora_weights_state_dict=lora_weights_reward_value_model_state_dict,
+        )
+
+        # Validate model adapter params were loaded in with the expected dtype
+        # TODO (rohan-varma): Further validation to ensure the appropriate base params
+        # are NF4 vs bf16 based on the quantization config.
+        training.validate_expected_param_dtype(self._policy_peft_config.adapter_params.items(), dtype=self._dtype)
+        training.validate_expected_param_dtype(
+            self._reward_value_model_peft_config.adapter_params.items(), dtype=self._dtype
         )
 
         log.info(f"Models are initialized with precision {self._dtype}.")
@@ -492,8 +504,8 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         Save state dict to file. The recipe save_checkpoint method is responsible for
         correctly creating the checkpoint dict and passing to the checkpointer.
         """
-        policy_ckpt_dict = {training.MODEL_KEY: self._policy_model.state_dict()}
-        value_ckpt_dict = {training.MODEL_KEY: self._value_model.state_dict()}
+        policy_ckpt_dict = {}
+        reward_value_ckpt_dict = {}
 
         # if training is in-progress, checkpoint the optimizer state and rng state as well
         if is_intermediate_checkpoint:
@@ -505,23 +517,58 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
                     training.MAX_STEPS_KEY: self._total_steps,
                     training.STEPS_KEY: self._steps_run,
                     training.RNG_KEY: self._rng.get_state(),
+                    training.OPT_KEY: self._optimizer.state_dict(),
                 }
             )
-            if not self._optimizer_in_bwd:
-                policy_ckpt_dict[training.OPT_KEY] = self._optimizer.state_dict()
-            else:
-                policy_ckpt_dict[training.OPT_KEY] = self._optim_ckpt_wrapper.state_dict()
+
+        if not self._save_adapter_weights_only:
+            # Construct the full state dicts with LoRA weights merged into base LLM weights
+            policy_state_dict = {k: v.cpu() for k, v in self._policy_model.state_dict().items()}
+            merged_policy_state_dict = get_merged_lora_ckpt(
+                policy_state_dict,
+                rank=self._policy_peft_config.lora_rank,
+                alpha=self._policy_peft_config.lora_alpha,
+            )
+            policy_ckpt_dict.update({training.MODEL_KEY: merged_policy_state_dict})
+
+            reward_value_state_dict = {k: v.cpu() for k, v in self._reward_value_model.state_dict().items()}
+            merged_reward_value_state_dict = get_merged_lora_ckpt(
+                reward_value_state_dict,
+                rank=self._reward_value_peft_config.lora_rank,
+                alpha=self._reward_value_peft_config.lora_alpha,
+            )
+            reward_value_ckpt_dict.update({training.MODEL_KEY: merged_reward_value_state_dict})
+
+        policy_adapter_key_filter = lambda x: x in self._policy_peft_config.adapter_params
+        policy_adapter_state_dict = {
+            k: v for k, v in self._policy.state_dict().items() if policy_adapter_key_filter(k)
+        }
+
+        reward_value_adapter_key_filter = lambda x: x in self._reward_value_peft_config.adapter_params
+        reward_value_adapter_state_dict = {
+            k: v for k, v in self._policy.state_dict().items() if reward_value_adapter_key_filter(k)
+        }
+
+        policy_ckpt_dict.update({training.ADAPTER_KEY: policy_adapter_state_dict})
+        reward_value_ckpt_dict.update({training.ADAPTER_KEY: reward_value_adapter_state_dict})
+
+        policy_ckpt_dict.update({training.ADAPTER_CONFIG: self._policy_peft_config.to_checkpoint_adapter_config()})
+        reward_value_ckpt_dict.update(
+            {training.ADAPTER_CONFIG: self._reward_value_peft_config.to_checkpoint_adapter_config()}
+        )
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
             epoch=epoch,
             intermediate_checkpoint=is_intermediate_checkpoint,
+            adapter_only=self._save_adapter_weights_only,
         )
 
         self._value_checkpointer.save_checkpoint(
-            value_ckpt_dict,
+            reward_value_ckpt_dict,
             epoch=epoch,
             intermediate_checkpoint=False,
+            adapter_only=self._save_adapter_weights_only,
         )
 
     def _update_recipe_state(self, ckpt_dict: Dict[str, Any]) -> None:
@@ -606,6 +653,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         # step 2.1 estimate logprobs of the responses using the reference policy
         with disable_adapter(self._policy_model):
             ref_logits = self._policy_model(query_responses, input_pos=position_ids, mask=masks)
+
         ref_logits = rlhf.truncate_sequence_for_logprobs(ref_logits, context_length)
         ref_logprobs = rlhf.logits_to_logprobs(ref_logits, responses, self._temperature)
 
@@ -708,9 +756,10 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "Expect a relatively slow first iteration."
             )
         # zero out the gradients before starting training
-        if not self._optimizer_in_bwd:
-            self._optimizer.zero_grad()
+        self._optimizer.zero_grad()
 
+        # perf counters
+        num_tokens = 0
         training_completed = False
         pbar = tqdm(total=self._total_steps, initial=self._steps_run)
         for curr_epoch in range(self._epochs_run, self._total_epochs):
@@ -721,12 +770,15 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             for _, batch in enumerate(self._dataloader):
                 batch = batch.to(self._device)
                 _, context_length = batch.shape
+                num_tokens = batch.numel()
 
                 # step 1. generate the trajectory using:
                 # - the current policy (pi_theta)
                 # - the current value function (V_phi)
                 # - the reference frozen policy model (pi_theta_0)
+                t0_traj = time.perf_counter()
                 trajectory = self.generate_trajectory_batched(batch)
+                traj_time = time.perf_counter() - t0_traj
 
                 # step 2. get the rewards for the current trajectory. these are based on:
                 #   - the divergence between the current policy and the reference policy
@@ -748,6 +800,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
                     masks=~trajectory.response_padding_masks,
                 )
 
+                t0_ppo = time.perf_counter()
                 # step 4. optimise using the PPO objective over multiple epochs
                 ppo_stats: List[PPOStats] = []
                 for _ in range(self._ppo_epochs):
@@ -781,12 +834,12 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                         ppo_stats.append(PPOStats(*map(sum, zip(*batch_ppo_stats))))
 
-                        if not self._optimizer_in_bwd:
-                            self._optimizer.step()
-                            self._optimizer.zero_grad(set_to_none=True)
+                        self._optimizer.step()
+                        self._optimizer.zero_grad(set_to_none=True)
 
                         self.global_step += 1
 
+                ppo_time = time.perf_counter() - t0_ppo
                 # step 5. profit
                 self._steps_run += 1
                 if self._steps_run % self._log_every_n_steps == 0:
@@ -795,6 +848,8 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
                         PPOStats(*map(torch.stack, zip(*ppo_stats))),
                         kl,
                         kl_rewards,
+                        num_tokens / traj_time,
+                        num_tokens / ppo_time,
                     )
                 self.cleanup_after_step(trajectory, ppo_stats, advantages, returns, kl, kl_rewards)
                 pbar.update(1)
@@ -850,7 +905,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         del pi_logits
 
         # estimate the values from the value function at the current optimisation step
-        phi_values = self._value_model(
+        phi_values = self._reward_value_model(
             trajectory.query_responses,
             input_pos=trajectory.position_ids,
             mask=trajectory.masks,
@@ -892,6 +947,8 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         ppo_stats: PPOStats,
         kl: torch.Tensor,
         kl_rewards: torch.Tensor,
+        tokens_per_second_trajectory: float,
+        tokens_per_second_ppo_loss: float,
     ) -> None:
         """
         Log metrics and statistics for the current step to the metric logger.
@@ -909,6 +966,8 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             "ratios": ppo_stats.ratios.mean(),
             "approx_policy_kl": ppo_stats.approx_policy_kls.mean(),
             "response_lengths": trajectory.seq_lens.float().mean(),
+            "tokens_per_second_per_gpu_trajectory": tokens_per_second_trajectory,
+            "tokens_per_second_per_gpu_ppo_loss": tokens_per_second_ppo_loss,
         }
         if self._device.type == "cuda" and self._log_peak_memory_stats:
             log_dict.update(utils.get_memory_stats(device=self._device))

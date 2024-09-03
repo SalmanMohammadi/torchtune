@@ -215,6 +215,17 @@ _ALL_RECIPES = [
         supports_distributed=False,
     ),
     Recipe(
+        name="lora_ppo_finetune_single_device",
+        file_path="lora_ppo_finetune_single_device.py",
+        supports_distributed=False,
+        configs=[
+            Config(
+                name="mistral/7B_full_ppo_low_memory",
+                file_path="mistral/7B_full_ppo_low_memory.yaml",
+            ),
+        ],
+    ),
+    Recipe(
         name="lora_finetune_distributed",
         file_path="lora_finetune_distributed.py",
         configs=[

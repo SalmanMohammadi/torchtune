@@ -179,7 +179,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             self._ref_policy_model,
         ) = self._setup_models(
             cfg_model=cfg.policy_model,
-            cfg_reward_value_model=cfg.reward_and_value_model,
+            cfg_reward_value_model=cfg.reward_value_model,
             enable_activation_checkpointing=cfg.enable_activation_checkpointing,
             compile_model=self._model_compile,
             policy_state_dict=policy_model_checkpoint_dict[training.MODEL_KEY],
