@@ -15,6 +15,7 @@ from ._utils import (  # noqa
     set_trainable_params,
     validate_missing_and_unexpected_for_lora,
     validate_state_dict_for_lora,
+    ModelPEFTConfig
 )
 from .dora import DoRALinear
 from .lora import LoRALinear

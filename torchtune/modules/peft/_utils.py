@@ -5,14 +5,23 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
-from typing import Any, Dict, Generator, List, Literal, Optional, Protocol, Set
+from typing import Any, Dict, Generator, List, Literal, Optional, Protocol, Set, NamedTuple
 
 import torch
 from torch import nn
+from omegaconf import DictConfig, ListConfig
 
 # Modules from MultiHeadAttention that LoRA can be applied to
 LORA_ATTN_MODULES = Literal["q_proj", "k_proj", "v_proj", "output_proj"]
 
+class ModelPEFTConfig(NamedTuple):
+    lora_rank: int
+    lora_alpha: float
+    lora_attn_modules: List[LORA_ATTN_MODULES]
+    apply_lora_to_mlp: bool
+    apply_lora_to_output: bool
+    adapter_params: Dict[str, nn.Parameter]
+    is_dora: bool
 
 class AdapterModule(Protocol):
     """
@@ -380,3 +389,18 @@ def load_dora_magnitudes(model: nn.Module) -> None:
     }
     sd = {f"{n}.magnitude": p.magnitude for n, p in dora_parents.items()}
     model.load_state_dict(sd, strict=False, assign=True)
+
+def setup_model_peft_config(model: nn.Module, cfg_model: DictConfig) -> ModelPEFTConfig:
+
+    adapter_params = get_adapter_params(model)
+    set_trainable_params(model, adapter_params)
+    return ModelPEFTConfig(
+        lora_rank=cfg_model.lora_rank,
+        lora_alpha=cfg_model.lora_alpha,
+        lora_attn_modules=list(cfg_model.lora_attn_modules),
+        apply_lora_to_mlp=cfg_model.apply_lora_to_mlp,
+        apply_lora_to_output=getattr(cfg_model, "apply_lora_to_output", False),
+        adapter_params=adapter_params,
+        is_dora=any(["magnitude" in k for k in adapter_params.keys()]),
+    )
+    

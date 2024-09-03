@@ -27,10 +27,13 @@ from torchtune.modules.peft import (
     disable_adapter,
     get_adapter_params,
     get_merged_lora_ckpt,
+    load_dora_magnitudes,
     set_trainable_params,
     validate_missing_and_unexpected_for_lora,
     validate_state_dict_for_lora,
+    ModelPEFTConfig,
 )
+from torchtune.modules.peft._utils import setup_model_peft_config
 
 log = utils.get_logger("DEBUG")
 
@@ -172,16 +175,15 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         # should be called before ``_setup_optimizer`` since transforming the optimizer
         # state dict requires the model
         self._model_compile = cfg.compile
-        self._optimizer_in_bwd = cfg.optimizer_in_bwd
-        (
-            self._policy_model,
-            self._reward_value_model
-        ) = self._setup_models(
+        (self._policy_model, self._reward_value_model) = self._setup_models(
             cfg_model=cfg.policy_model,
             cfg_reward_value_model=cfg.reward_and_value_model,
             enable_activation_checkpointing=cfg.enable_activation_checkpointing,
-            policy_state_dict=policy_model_checkpoint_dict[training.MODEL_KEY],
-            reward_model_state_dict=reward_model_state_dict[training.MODEL_KEY],
+            compile_model=cfg.compile,
+            base_policy_state_dict=policy_model_checkpoint_dict[training.MODEL_KEY],
+            base_reward_model_state_dict=reward_model_state_dict[training.MODEL_KEY],
+            lora_weights_policy_state_dict=policy_model_checkpoint_dict[training.ADAPTER_KEY],
+            lora_weights_reward_model_state_dict=reward_model_state_dict[training.ADAPTER_KEY],
         )
 
         # setup tokenizer
@@ -349,7 +351,32 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             reward_checkpointer,
         )
 
-    def _setup_model_for_lora(self):
+    def _validate_load_model_peft_checkpoint(
+        self, model, base_model_state_dict, model_peft_config, lora_weights_state_dict=None
+    ):
+        base_missing, base_unexpected = model.load_state_dict(base_model_state_dict, strict=False)
+        # This is for any adapters that need to be initialized after base weights
+        # have been loaded (e.g. DoRA).
+        if model_peft_config.is_dora:
+            load_dora_magnitudes(model)
+        if lora_weights_state_dict:
+            lora_missing, lora_unexpected = model.load_state_dict(lora_weights_state_dict, strict=False)
+        else:
+            lora_missing, lora_unexpected = None, None
+        validate_missing_and_unexpected_for_lora(
+            lora_attn_modules=model_peft_config.lora_attn_modules,
+            apply_lora_to_mlp=model_peft_config.apply_lora_to_mlp,
+            apply_lora_to_output=model_peft_config.apply_lora_to_output,
+            base_missing=base_missing,
+            base_unexpected=base_unexpected,
+            lora_missing=lora_missing,
+            lora_unexpected=lora_unexpected,
+        )
+        # Validate model adapter params were loaded in with the expected dtype
+        # TODO (rohan-varma): Further validation to ensure the appropriate base params
+        # are NF4 vs bf16 based on the quantization config.
+        training.validate_expected_param_dtype(model_peft_config.adapter_params.items(), dtype=self._dtype)
+
     def _setup_models(
         self,
         cfg_model: DictConfig,
@@ -357,7 +384,9 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         enable_activation_checkpointing: bool,
         policy_state_dict: Dict[str, Any],
         reward_model_state_dict: Dict[str, Any],
-    ) -> Tuple[nn.Module, nn.Module, nn.Module]:
+        model_lora_weights_state_dict: Optional[Dict[str, Any]] = None,
+        reward_model_lora_weights_state_dict: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[nn.Module, nn.Module]:
         """
         Sets up the policy model, reference policy model, reward model, and value model.
         """
@@ -366,25 +395,28 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             policy_model = config.instantiate(cfg_model)
             reward_value_model = config.instantiate(cfg_reward_value_model)
 
+        self._policy_peft_config = setup_model_peft_config(policy_model, cfg_model)
+        self._reward_value_model_peft_config = setup_model_peft_config(reward_value_model, cfg_reward_value_model)
+
         if enable_activation_checkpointing:
             utils.set_activation_checkpointing(policy_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer})
             utils.set_activation_checkpointing(
                 reward_value_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
             )
 
-        policy_model.load_state_dict(policy_state_dict)
-        reward_value_model.load_state_dict(reward_model_state_dict)
-
         # since we should be loading a classifier checkpoint into
         # a classifier model, this function should just ensure
         # output.weight appears in the state_dict and the model's parameters,
         # and removes output.bias from the state dict if found
         training.update_state_dict_for_classifier(reward_model_state_dict, reward_value_model.named_parameters())
-        reward_value_model.load_state_dict(reward_model_state_dict)
 
         # Validate models were loaded in with the expected dtype.
-        training.validate_expected_param_dtype(reward_model_state_dict.named_parameters(), dtype=self._dtype)
-        training.validate_expected_param_dtype(policy_model.named_parameters(), dtype=self._dtype)
+        self._validate_load_model_peft_checkpoint(
+            policy_model, policy_state_dict, lora_weights_state_dict=model_lora_weights_state_dict
+        )
+        self._validate_load_model_peft_checkpoint(
+            reward_value_model, policy_state_dict, lora_weights_state_dict=reward_model_lora_weights_state_dict
+        )
 
         log.info(f"Models are initialized with precision {self._dtype}.")
 
