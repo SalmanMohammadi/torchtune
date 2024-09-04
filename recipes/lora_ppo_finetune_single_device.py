@@ -33,6 +33,11 @@ from torchtune.modules.peft import (
     validate_state_dict_for_lora,
     ModelPEFTConfig,
 )
+from torchtune.generation import (
+    generate,
+    get_causal_mask_from_padding_mask,
+    get_position_ids_from_padding_masks,
+)
 import time
 from torchtune.modules.peft._utils import setup_model_peft_config, validate_load_model_peft_checkpoint
 
@@ -390,7 +395,8 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         with training.set_default_dtype(self._dtype), self._device:
             policy_model = config.instantiate(cfg_policy)
-            reward_value_model = config.instantiate(cfg_reward_value_model)
+            policy_model.setup_caches(batch_size=self._forward_batch_size, dtype=self._dtype)
+            reward_value_model = config.instantiate(cfg_reward_value_model, )
 
         self._policy_peft_config = setup_model_peft_config(policy_model, cfg_policy)
         self._reward_value_model_peft_config = setup_model_peft_config(reward_value_model, cfg_reward_value_model)
@@ -624,7 +630,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         batch_size, context_length = input_ids.shape
 
         # step 1: generate responses, and logits corresponding to the responses using the current policy
-        query_responses, logits = rlhf.generate_with_logits(
+        query_responses, logits = generate(
             model=self._policy_model,
             prompt=input_ids,
             max_generated_tokens=self._max_generated_tokens,
@@ -635,12 +641,11 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         responses = query_responses[:, context_length:].clone()
-        query_response_padding_masks = query_responses == self._tokenizer.pad_id
+        query_response_padding_masks = query_responses != self._tokenizer.pad_id
 
         # step 1.1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
-        masks = rlhf.get_causal_mask(~(query_response_padding_masks))
-        position_ids = (~query_response_padding_masks).cumsum(-1) - (~query_response_padding_masks).long()
-        position_ids = position_ids.type(torch.int)
+        masks = get_causal_mask_from_padding_mask(query_response_padding_masks)
+        position_ids = get_position_ids_from_padding_masks(query_response_padding_masks)
 
         del query_response_padding_masks
 
