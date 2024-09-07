@@ -37,6 +37,7 @@ from torchtune.generation import (
     generate,
     get_causal_mask_from_padding_mask,
     get_position_ids_from_padding_masks,
+    generate_next_token,
 )
 import time
 from torchtune.modules.peft._utils import setup_model_peft_config, validate_load_model_peft_checkpoint
@@ -123,7 +124,6 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         self._device = utils.get_device(device=cfg.device)
         self._dtype = training.get_dtype(cfg.dtype, device=self._device)
-
         # Disable for fp16, as we haven't validated "full" fp16 with this recipe, nor
         # enabled necessary features such as gradient scaling.
         if self._dtype == torch.float16:
@@ -138,7 +138,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # These are public properties which are updated by the checkpoint loader
         # when ``resume_from_checkpoint`` is `True` or validated in tests
-        self.seed = utils.set_seed(seed=cfg.seed)
+        self.seed = training.set_seed(seed=cfg.seed)
         # manually setting up a generator for the recipe
         self._rng = torch.Generator(self._device).manual_seed(self.seed)
         self._total_steps = 0
@@ -151,6 +151,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
         self._save_adapter_weights_only = cfg.get("save_adapter_weights_only", False)
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
+        self._dtype = torch.float16
 
     def setup(self, cfg: DictConfig) -> None:
         """
@@ -162,10 +163,25 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         # log config with parameter override
         self._metric_logger.log_config(cfg)
 
+        # setup tokenizer
+        self._tokenizer = config.instantiate(cfg.tokenizer)
+        log.info("Tokenizer is initialized from file.")
+
+        # sampler and dataloader depends on the tokenizer and should be set
+        # setup after it is initialized
+        self._sampler, self._dataloader = self._setup_data(
+            cfg_dataset=cfg.dataset,
+            shuffle=cfg.shuffle,
+            batch_size=cfg.batch_size,
+        )
+
+        self._setup_training_parameters(cfg)
+        self._setup_training_hyperparameters(cfg)
+
         # setup checkpointers
         (
             self._policy_checkpointer,
-            self._reward_checkpointer,
+            self._reward_value_checkpointer,
         ) = self._setup_checkpointers(
             cfg.checkpointer,
             cfg.reward_checkpointer,
@@ -197,10 +213,6 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             lora_weights_reward_value_model_state_dict=lora_weights_reward_value_model_state_dict,
         )
 
-        # setup tokenizer
-        self._tokenizer = config.instantiate(cfg.tokenizer)
-        log.info("Tokenizer is initialized from file.")
-
         # _setup_optimizer should take in ckpt_dict only if training is resumed from
         # checkpoint. Transforming the opt state dict is handled by this method
         self._optimizer = self._setup_optimizer(
@@ -211,19 +223,21 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._loss_fn = config.instantiate(cfg.loss)
         log.info("Loss is initialized.")
 
-        # sampler and dataloader depends on the tokenizer and should be set
-        # setup afterit is initialized
-        self._sampler, self._dataloader = self._setup_data(
-            cfg_dataset=cfg.dataset,
-            shuffle=cfg.shuffle,
-            batch_size=cfg.batch_size,
-        )
-
-        self._setup_training_parameters(cfg)
-        self._setup_training_hyperparameters(cfg)
-
         # one "step" is a single gradient update update over a minibatch of trajectories
         self.global_step = self._steps_run * self._ppo_epochs * (self.batch_size // self._ppo_batch_size)
+
+        # TODO REMOVE
+        import logging
+
+        torch._logging.set_logs(recompiles=True)
+        self.generate_next_token = generate_next_token
+        if cfg.get("compile_generate", False):
+            self.generate_next_token = torch.compile(
+                generate_next_token, backend=os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
+            )
+
+        if cfg.get("compile_loss", False):
+            self._loss_fn = torch.compile(self._loss_fn, backend=os.environ.get("TORCH_COMPILE_BACKEND", "inductor"))
 
     def _setup_training_hyperparameters(self, cfg) -> None:
         """
@@ -360,7 +374,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
 
         policy_model_checkpoint_dict = self._policy_checkpointer.load_checkpoint()
-        reward_model_checkpoint_dict = self._reward_checkpointer.load_checkpoint()
+        reward_model_checkpoint_dict = self._reward_value_checkpointer.load_checkpoint()
 
         if self._resume_from_checkpoint:
             if training.ADAPTER_KEY not in policy_model_checkpoint_dict:
@@ -395,15 +409,21 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         with training.set_default_dtype(self._dtype), self._device:
             policy_model = config.instantiate(cfg_policy)
-            policy_model.setup_caches(batch_size=self._forward_batch_size, dtype=self._dtype)
-            reward_value_model = config.instantiate(cfg_reward_value_model, )
+            policy_model.setup_caches(
+                batch_size=self._forward_batch_size, dtype=self._dtype, max_seq_len=self._tokenizer.max_seq_len
+            )
+            reward_value_model = config.instantiate(
+                cfg_reward_value_model,
+            )
 
         self._policy_peft_config = setup_model_peft_config(policy_model, cfg_policy)
-        self._reward_value_model_peft_config = setup_model_peft_config(reward_value_model, cfg_reward_value_model)
+        self._reward_value_peft_config = setup_model_peft_config(reward_value_model, cfg_reward_value_model)
 
         if enable_activation_checkpointing:
-            utils.set_activation_checkpointing(policy_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer})
-            utils.set_activation_checkpointing(
+            training.set_activation_checkpointing(
+                policy_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
+            )
+            training.set_activation_checkpointing(
                 reward_value_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
             )
 
@@ -424,7 +444,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         validate_load_model_peft_checkpoint(
             reward_value_model,
             base_reward_value_model_state_dict,
-            self._reward_value_model_peft_config,
+            self._reward_value_peft_config,
             lora_weights_state_dict=lora_weights_reward_value_model_state_dict,
         )
 
@@ -433,7 +453,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         # are NF4 vs bf16 based on the quantization config.
         training.validate_expected_param_dtype(self._policy_peft_config.adapter_params.items(), dtype=self._dtype)
         training.validate_expected_param_dtype(
-            self._reward_value_model_peft_config.adapter_params.items(), dtype=self._dtype
+            self._reward_value_peft_config.adapter_params.items(), dtype=self._dtype
         )
 
         log.info(f"Models are initialized with precision {self._dtype}.")
@@ -450,8 +470,8 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
                 module.p = 0
 
         if self._device.type == "cuda":
-            memory_stats = utils.get_memory_stats(device=self._device)
-            utils.log_memory_stats(memory_stats)
+            memory_stats = training.get_memory_stats(device=self._device)
+            training.log_memory_stats(memory_stats)
 
         return policy_model, reward_value_model
 
@@ -547,12 +567,12 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         policy_adapter_key_filter = lambda x: x in self._policy_peft_config.adapter_params
         policy_adapter_state_dict = {
-            k: v for k, v in self._policy.state_dict().items() if policy_adapter_key_filter(k)
+            k: v for k, v in self._policy_model.state_dict().items() if policy_adapter_key_filter(k)
         }
 
         reward_value_adapter_key_filter = lambda x: x in self._reward_value_peft_config.adapter_params
         reward_value_adapter_state_dict = {
-            k: v for k, v in self._policy.state_dict().items() if reward_value_adapter_key_filter(k)
+            k: v for k, v in self._reward_value_model.state_dict().items() if reward_value_adapter_key_filter(k)
         }
 
         policy_ckpt_dict.update({training.ADAPTER_KEY: policy_adapter_state_dict})
@@ -570,7 +590,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             adapter_only=self._save_adapter_weights_only,
         )
 
-        self._value_checkpointer.save_checkpoint(
+        self._reward_value_checkpointer.save_checkpoint(
             reward_value_ckpt_dict,
             epoch=epoch,
             intermediate_checkpoint=False,
@@ -638,6 +658,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             top_k=self._top_k,
             pad_id=self._tokenizer.pad_id,
             rng=self._rng,
+            custom_generate_next_token=self.generate_next_token,
         )
 
         responses = query_responses[:, context_length:].clone()
@@ -648,7 +669,6 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         position_ids = get_position_ids_from_padding_masks(query_response_padding_masks)
 
         del query_response_padding_masks
-
         # step 2. estimate logprobs of the responses using the current policy
         logits = logits[:, context_length - 1 :]
         logprobs = rlhf.logits_to_logprobs(logits, responses, self._temperature)
@@ -686,7 +706,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # step 5.1 the scores from the reward model are the logits for the last non-padding token in
         # each (query, truncated-response) pair
-        seq_lens = utils.get_unmasked_sequence_lengths(response_padding_masks)
+        seq_lens = training.get_unmasked_sequence_lengths(response_padding_masks)
         scores = scores[torch.arange(batch_size), seq_lens + context_length].squeeze(-1)
 
         # step 5.2 if configured, apply any penalties for sequences without EOS tokens
@@ -749,6 +769,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             for batch_start in range(0, self.batch_size, self._forward_batch_size):
                 batch_input_ids = input_ids[batch_start : batch_start + self._forward_batch_size]
                 trajectories.append(self.generate_trajectory(batch_input_ids))
+                self._policy_model.reset_caches()
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
     def train(self) -> None:
@@ -975,7 +996,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
             "tokens_per_second_per_gpu_ppo_loss": tokens_per_second_ppo_loss,
         }
         if self._device.type == "cuda" and self._log_peak_memory_stats:
-            log_dict.update(utils.get_memory_stats(device=self._device))
+            log_dict.update(training.get_memory_stats(device=self._device))
 
         self._metric_logger.log_dict(log_dict, step=self.global_step)
 

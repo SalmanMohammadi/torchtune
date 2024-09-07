@@ -37,38 +37,32 @@ dataset:
 
 # manually constructing 1B models
 policy_model:
-  _component_: torchtune.models.llama2.lora_llama2
-  lora_rank: 32
-  lora_alpha: 64
-  lora_attn_modules: ['q_proj', 'v_proj']
-  apply_lora_to_mlp: False\
-  vocab_size: 32000
-  num_layers: 22
-  num_heads: 32
-  num_kv_heads: 4
-  embed_dim: 2048
-  max_seq_len: 2048
-  intermediate_dim: 5632
-  attn_dropout: 0.0
-  norm_eps: 1e-5
+  _component_: torchtune.models.llama3_1.qlora_llama3_1_8b
+  lora_attn_modules: ['q_proj', 'v_proj', 'k_proj', 'output_proj']
+  apply_lora_to_mlp: True
+  apply_lora_to_output: False
+  lora_rank: 8
+  lora_alpha: 16
 
 reward_value_model:
-  _component_: torchtune.models.llama2.lora_llama2_classifier
-  lora_rank: 32
-  lora_alpha: 64
-  lora_attn_modules: ['q_proj', 'v_proj']
-  apply_lora_to_mlp: False
+  _component_: torchtune.models.llama3_1._component_builders.lora_llama3_1_classifier
+  lora_rank: 8
+  lora_alpha: 16
+  lora_attn_modules: ['q_proj', 'v_proj', 'k_proj', 'output_proj']
+  apply_lora_to_mlp: True
   apply_lora_to_output: True
   num_classes: 1
-  vocab_size: 32000
-  num_layers: 22
+  vocab_size: 128257
+  num_layers: 32
   num_heads: 32
-  num_kv_heads: 4
-  embed_dim: 2048
-  max_seq_len: 2048
-  intermediate_dim: 5632
+  num_kv_heads: 8
+  embed_dim: 4086
+  max_seq_len: 131072
+  intermediate_dim: 14336
   attn_dropout: 0.0
   norm_eps: 1e-5
+  quantize_base: True
+  rope_base: 500000.0
 
 # checkpointer for the policy model - update this if resuming from checkpoint
 checkpointer:

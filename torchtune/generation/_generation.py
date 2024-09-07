@@ -134,7 +134,7 @@ def get_causal_mask_from_padding_mask(
         diagonal=0,
     ).repeat(bsz, 1, 1)
     mask.narrow(2, 0, seq_len).mul_(padding_mask[:, None, :].expand(-1, seq_len, -1))
-    mask.diagonal(dim1=1, dim2=2).copy_(True)
+    mask.diagonal(dim1=1, dim2=2).copy_(torch.tensor([True]))
     return mask
 
 
@@ -254,7 +254,7 @@ def generate(
     q = torch.empty(
         (bsz, model.tok_embeddings.num_embeddings), device=prompt.device
     ).exponential_(1, generator=rng)
-    tokens, _ = generate_next_token(
+    tokens, generated_logits = generate_next_token(
         model,
         input_pos=input_pos[:, :prompt_length].squeeze(),
         mask=curr_masks,
@@ -271,11 +271,11 @@ def generate(
     curr_cache_pos = None
     for _ in range(max_generated_tokens - 1):
         if incremental_decoding:
-            curr_input_pos = input_pos[:, curr_pos]
+            curr_input_pos = input_pos[:, curr_pos].contiguous()
             curr_cache_pos = (
                 cache_pos[curr_pos].unsqueeze(0) if cache_pos is not None else None
             )
-            curr_masks = masks[:, curr_pos, None, :]
+            curr_masks = masks[:, curr_pos, None, :].contiguous()
         else:
             tokens = generated_tokens.clone()
             curr_input_pos = input_pos[:, : curr_pos + 1]
@@ -284,6 +284,7 @@ def generate(
         q = torch.empty(
             (bsz, model.tok_embeddings.num_embeddings), device=prompt.device
         ).exponential_(1, generator=rng)
+
         tokens, logits = custom_generate_next_token(
             model,
             input_pos=curr_input_pos,
@@ -296,5 +297,9 @@ def generate(
         )
         generated_tokens = torch.cat([generated_tokens, tokens], dim=-1)
         curr_pos += 1
+        if incremental_decoding:
+            generated_logits = torch.cat([generated_logits, logits], dim=1)
+        else:
+            generated_logits = logits
 
-    return generated_tokens, logits
+    return generated_tokens, generated_logits

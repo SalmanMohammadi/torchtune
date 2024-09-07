@@ -8,8 +8,9 @@ import logging
 from typing import Optional
 
 import torch
-from torch import nn, Tensor
+from torch import nn
 from torchtune.modules.kv_cache import KVCache
+from torch import Tensor
 
 logger = logging.getLogger(__name__)
 
@@ -100,16 +101,10 @@ class MultiHeadAttention(nn.Module):
     ) -> None:
         super().__init__()
         if num_heads % num_kv_heads != 0:
-            raise ValueError(
-                f"num_heads ({num_heads}) must be divisible by "
-                f"num_kv_heads ({num_kv_heads})"
-            )
+            raise ValueError(f"num_heads ({num_heads}) must be divisible by " f"num_kv_heads ({num_kv_heads})")
 
         if embed_dim % num_heads != 0:
-            raise ValueError(
-                f"embed_dim ({embed_dim}) must be divisible by "
-                f"num_heads ({num_heads})"
-            )
+            raise ValueError(f"embed_dim ({embed_dim}) must be divisible by " f"num_heads ({num_heads})")
 
         if attn_dropout < 0 or attn_dropout > 1:
             raise ValueError(f"attn_dropout ({embed_dim}) must be between 0.0 and 1.0")
@@ -136,9 +131,7 @@ class MultiHeadAttention(nn.Module):
         self.k_norm = k_norm
         self.pos_embeddings = pos_embeddings
 
-    def setup_cache(
-        self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None
-    ) -> None:
+    def setup_cache(self, batch_size: int, dtype: torch.dtype, max_seq_len: Optional[int] = None) -> None:
         """Setup key value caches for attention calculation. If called
         after kv_cache is already setup, this will be skipped.
 
@@ -149,9 +142,7 @@ class MultiHeadAttention(nn.Module):
         """
         # Don't overwrite user defined kv_cache from init
         if self.kv_cache is not None:
-            logger.warning(
-                "Key value caches are already setup. You cannot call ``setup_caches()`` twice. Skipping."
-            )
+            logger.warning("Key value caches are already setup. You cannot call ``setup_caches()`` twice. Skipping.")
         else:
             self.kv_cache = KVCache(
                 batch_size=batch_size,
@@ -164,15 +155,13 @@ class MultiHeadAttention(nn.Module):
     def reset_cache(self):
         """Reset the key value caches."""
         if self.kv_cache is None:
-            raise RuntimeError(
-                "Key value caches are not setup. Call ``setup_caches()`` first."
-            )
+            raise RuntimeError("Key value caches are not setup. Call ``setup_caches()`` first.")
         self.kv_cache.reset()
 
     def forward(
         self,
-        x: Tensor,
-        y: Optional[Tensor] = None,
+        x: torch.Tensor,
+        y: Optional[torch.Tensor] = None,
         *,
         mask: Optional[Tensor] = None,
         input_pos: Optional[Tensor] = None,
@@ -180,15 +169,15 @@ class MultiHeadAttention(nn.Module):
     ) -> Tensor:
         """
         Args:
-            x (Tensor): input tensor with shape [b x s_x x d]
-            y (Optional[Tensor]): second input tensor for cross attention with shape [b x s_y x d]
-            mask (Optional[Tensor]): Optional boolean tensor which contains the attention mask
+            x (torch.Tensor): input tensor with shape [b x s_x x d]
+            y (Optional[torch.Tensor]): second input tensor for cross attention with shape [b x s_y x d]
+            mask (Optional[torch.Tensor]): Optional boolean tensor which contains the attention mask
                 with shape [batch_size x seq_length x seq_length]. This is applied after
                 the query-key multiplication and before the softmax. A value of True in row i
                 and column j means token i attends to token j. A value of False means token i
                 does not attend to token j. If no mask is specified, a causal mask
                 is used by default. Default is None.
-            input_pos (Optional[Tensor]): Optional tensor which contains the position ids
+            input_pos (Optional[torch.Tensor]): Optional tensor which contains the position ids
                 of each token. During training, this is used to indicate the positions
                 of each token relative to its sample when packed, shape [b x s].
                 During inference, this indicates the position of the current token.

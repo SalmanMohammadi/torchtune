@@ -38,10 +38,11 @@ dataset:
 # manually constructing 1B models
 policy_model:
   _component_: torchtune.models.llama2.lora_llama2
-  lora_rank: 32
-  lora_alpha: 64
-  lora_attn_modules: ['q_proj', 'v_proj']
-  apply_lora_to_mlp: False\
+  lora_rank: 8
+  lora_alpha: 16
+  lora_attn_modules: ['q_proj', 'v_proj', 'k_proj', 'output_proj']
+  apply_lora_to_mlp: True
+  apply_lora_to_output: False
   vocab_size: 32000
   num_layers: 22
   num_heads: 32
@@ -51,13 +52,14 @@ policy_model:
   intermediate_dim: 5632
   attn_dropout: 0.0
   norm_eps: 1e-5
+  quantize_base: True
 
 reward_value_model:
   _component_: torchtune.models.llama2.lora_llama2_classifier
-  lora_rank: 32
-  lora_alpha: 64
-  lora_attn_modules: ['q_proj', 'v_proj']
-  apply_lora_to_mlp: False
+  lora_rank: 8
+  lora_alpha: 16
+  lora_attn_modules: ['q_proj', 'v_proj', 'k_proj', 'output_proj']
+  apply_lora_to_mlp: True
   apply_lora_to_output: True
   num_classes: 1
   vocab_size: 32000
@@ -69,6 +71,7 @@ reward_value_model:
   intermediate_dim: 5632
   attn_dropout: 0.0
   norm_eps: 1e-5
+  quantize_base: True
 
 # checkpointer for the policy model - update this if resuming from checkpoint
 checkpointer:
