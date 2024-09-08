@@ -206,11 +206,11 @@ class MultiHeadAttention(nn.Module):
         b, s_x, _ = x.shape
         y = y if y is not None else x
         s_y = y.shape[1]
-        if self.kv_cache and input_pos is None:
-            cache_size = self.kv_cache.size
-            input_pos = torch.arange(cache_size, cache_size + s_y, device=x.device)
+        # if self.kv_cache and input_pos is None:
+        #     cache_size = self.kv_cache.size
+        #     input_pos = torch.arange(cache_size, cache_size + s_y, device=x.device)
 
-        cache_pos = input_pos if cache_pos is None else cache_pos
+        # cache_pos = input_pos if cache_pos is None else cache_pos
         # q has shape [b, s_x, num_heads * head_dim]
         # k has shape [b, s_y, num_kv_heads * head_dim]
         # v has shape [b, s_y, num_kv_heads * head_dim]
@@ -263,7 +263,9 @@ class MultiHeadAttention(nn.Module):
             mask = mask[:, None, :, :]
 
         # Update key-value cache
-        if self.kv_cache is not None and torch.is_inference_mode_enabled():
+        # import pdb
+        # pdb.set_trace()
+        if self.kv_cache is not None and cache_pos is not None:
             k, v = self.kv_cache.update(cache_pos, k, v)
 
         # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/

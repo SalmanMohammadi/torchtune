@@ -151,7 +151,6 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._resume_from_checkpoint = cfg.resume_from_checkpoint
         self._save_adapter_weights_only = cfg.get("save_adapter_weights_only", False)
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
-        self._dtype = torch.float16
 
     def setup(self, cfg: DictConfig) -> None:
         """
@@ -233,7 +232,7 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         self.generate_next_token = generate_next_token
         if cfg.get("compile_generate", False):
             self.generate_next_token = torch.compile(
-                generate_next_token, backend=os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
+                generate_next_token, fullgraph=True, backend=os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
             )
 
         if cfg.get("compile_loss", False):

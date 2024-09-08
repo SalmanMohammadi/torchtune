@@ -68,10 +68,10 @@ class KVCache(nn.Module):
         if cache_pos.shape[0] != k_val.shape[2]:
             raise AssertionError(
                 "The sequence length of cache_pos must be the same as "
-                "the sequence length of the k-v cache. Found cache_pos.shape[0]"
-                f"={cache_pos.shape[0]} and k_val.shape[2]={k_val.shape[2]}."
+                "the sequence length of the k-v cache. Found cache_pos.shape"
+                f"={cache_pos.shape[0]} and k_val.shape={k_val.shape[2]}."
             )
-        self.size = cache_pos.max() + 1
+        # self.size = cache_pos.max() + 1
 
         k_out = self.k_cache
         v_out = self.v_cache
