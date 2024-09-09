@@ -1,6 +1,8 @@
 apt update
-apt install vim screen
-pip install torchao
+apt install vim screen -y 
+pip uninstall torch
+pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124 
+pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu124 # full options are cpu/cu118/cu121/cu124
 pip install -e .["dev"]
 tune download Skywork/Skywork-Reward-Llama-3.1-8B --output-dir /workspace/reward/ --ignore-patterns " "
 tune download meta-llama/Meta-Llama-3.1-8B-Instruct --output-dir /workspace/policy_model --ignore-patterns "original/consolidated.00.pth" --hf-token $HF_TOKEN
