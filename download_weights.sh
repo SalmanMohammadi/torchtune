@@ -1,3 +1,5 @@
+apt update
+apt install vim screen
 pip install torchao
 pip install -e .["dev"]
 tune download Skywork/Skywork-Reward-Llama-3.1-8B --output-dir /workspace/reward/ --ignore-patterns " "
