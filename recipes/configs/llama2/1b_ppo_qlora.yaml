@@ -23,7 +23,7 @@
 # Tokenizer
 tokenizer:
   _component_: torchtune.models.llama2.llama2_tokenizer
-  path:  ./target/1b_normal/tokenizer.model
+  path:  /workspace/policy_model_1b/tokenizer.model
   max_seq_len: 512
 
 # Dataset
@@ -76,7 +76,7 @@ reward_value_model:
 # checkpointer for the policy model - update this if resuming from checkpoint
 checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer
-  checkpoint_dir: ./target/1b_normal
+  checkpoint_dir: /workspace/policy_model_1b/
   checkpoint_files: [
       "pytorch_model.bin",
   ]
@@ -90,7 +90,7 @@ checkpointer:
 # always points to the original reward model weights, even if resuming training
 reward_checkpointer:
   _component_: torchtune.training.FullModelHFCheckpointer
-  checkpoint_dir:  ./target/tinyllama_rm_sentiment_1b
+  checkpoint_dir:  /workspace/reward_1b
   checkpoint_files: [
       "model.safetensors"
   ]
@@ -166,7 +166,7 @@ metric_logger:
 log_every_n_steps: 1
 
 resume_from_checkpoint: False
-output_dir: ./target/ppo
+output_dir: /workspace/ppo_1b
 seed: null
 shuffle: True
 save_adapter_weights_only: True
