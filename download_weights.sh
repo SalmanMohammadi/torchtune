@@ -1,6 +1,6 @@
 apt update
 apt install vim screen -y 
-pip uninstall torch
+pip uninstall torch -y
 pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124 
 pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu124 # full options are cpu/cu118/cu121/cu124
 pip install -e .["dev"]
