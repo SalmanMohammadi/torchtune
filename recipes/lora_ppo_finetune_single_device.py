@@ -237,7 +237,10 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         if cfg.get("compile_loss", False):
             self._loss_fn = torch.compile(self._loss_fn, backend=os.environ.get("TORCH_COMPILE_BACKEND", "inductor"))
-
+        if cfg.get("compile_trajectory", False):
+            self.estimate_trajectory = torch.compile(
+                self.estimate_trajectory, backend=os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
+            )
     def _setup_training_hyperparameters(self, cfg) -> None:
         """
         Sets up the training hyperparameters for the recipe. This includes the GAE hyperparameters,
@@ -624,8 +627,25 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "Checkpoint does not contain the required keys needed for updating recipe state."
                 "Are you sure you passed in the right recipe checkpoint?"
             )
-
+        
     def generate_trajectory(self, input_ids: torch.Tensor) -> Trajectory:
+        batch_size, context_length = input_ids.shape
+
+        # step 1: generate responses, and logits corresponding to the responses using the current policy
+        query_responses, logits = generate(
+            model=self._policy_model,
+            prompt=input_ids,
+            max_generated_tokens=self._max_generated_tokens,
+            temperature=self._temperature,
+            top_k=self._top_k,
+            pad_id=self._tokenizer.pad_id,
+            rng=self._rng,
+            custom_generate_next_token=self.generate_next_token,
+        )
+
+        return query_responses
+
+    def estimate_trajectory(self, input_ids: torch.Tensor, query_responses, logits) -> Trajectory:
         """
         Generates a trajectory given the current policy and value models, the reference policy model, the reward model,
         and batch of inputs. This is done over the following steps:
@@ -649,16 +669,16 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         batch_size, context_length = input_ids.shape
 
         # step 1: generate responses, and logits corresponding to the responses using the current policy
-        query_responses, logits = generate(
-            model=self._policy_model,
-            prompt=input_ids,
-            max_generated_tokens=self._max_generated_tokens,
-            temperature=self._temperature,
-            top_k=self._top_k,
-            pad_id=self._tokenizer.pad_id,
-            rng=self._rng,
-            custom_generate_next_token=self.generate_next_token,
-        )
+        # query_responses, logits = generate(
+        #     model=self._policy_model,
+        #     prompt=input_ids,
+        #     max_generated_tokens=self._max_generated_tokens,
+        #     temperature=self._temperature,
+        #     top_k=self._top_k,
+        #     pad_id=self._tokenizer.pad_id,
+        #     rng=self._rng,
+        #     custom_generate_next_token=self.generate_next_token,
+        # )
 
         responses = query_responses[:, context_length:].clone()
         query_response_padding_masks = query_responses != self._tokenizer.pad_id
@@ -767,7 +787,18 @@ class LoRAPPOFinetuneRecipeSingleDevice(FTRecipeInterface):
         with torch.no_grad():
             for batch_start in range(0, self.batch_size, self._forward_batch_size):
                 batch_input_ids = input_ids[batch_start : batch_start + self._forward_batch_size]
-                trajectories.append(self.generate_trajectory(batch_input_ids))
+                query_responses, logits = generate(
+                    model=self._policy_model,
+                    prompt=batch_input_ids,
+                    max_generated_tokens=self._max_generated_tokens,
+                    temperature=self._temperature,
+                    top_k=self._top_k,
+                    pad_id=self._tokenizer.pad_id,
+                    rng=self._rng,
+                    custom_generate_next_token=self.generate_next_token,
+                )
+
+                trajectories.append(self.estimate_trajectory(batch_input_ids, query_responses, logits))
                 self._policy_model.reset_caches()
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
