@@ -46,24 +46,14 @@ policy_model:
   lora_alpha: 16
 
 reward_value_model:
-  _component_: torchtune.models.llama3_1._component_builders.lora_llama3_1_classifier
+  _component_: torchtune.models.llama3_1._model_builders.lora_llama3_1_8b_classifier
   lora_rank: 8
   lora_alpha: 16
   lora_attn_modules: ['q_proj', 'v_proj', 'k_proj', 'output_proj']
   apply_lora_to_mlp: True
   apply_lora_to_output: True
-  num_classes: 1
-  vocab_size: 128257
-  num_layers: 32
-  num_heads: 32
-  num_kv_heads: 8
-  embed_dim: 4086
-  max_seq_len: 131072
-  intermediate_dim: 14336
-  attn_dropout: 0.0
-  norm_eps: 1e-5
   quantize_base: True
-  rope_base: 500000.0
+
 
 # checkpointer for the policy model - update this if resuming from checkpoint
 checkpointer:
@@ -100,10 +90,10 @@ reward_checkpointer:
 device: cuda
 
 # Training arguments
-batch_size: 128
-num_steps: 100000
+batch_size: 256
+num_steps: 1000000
 ppo_epochs: 1
-ppo_batch_size: 32
+ppo_batch_size: 64
 gradient_accumulation_steps: 2
 
 # Memory management and performance
@@ -118,11 +108,12 @@ enable_activation_checkpointing: True
 
 # Reduced precision
 dtype: bf16
-
+compile_loss: True
+compile_generate: True
 # Trajectory generation arguments
 
 # batch size for forward pass during generation
-forward_batch_size: 16
+forward_batch_size: 32
 max_generated_tokens: 58
 temperature: 0.7
 top_k: null
@@ -138,8 +129,8 @@ reward_penalty: -3
 
 # tokens to consider as "end of sequence" tokens
 stop_token_ids: [
-  2,  # eos_id
-  29889 # llama2 "." token
+  128001,  # eos_id
+  13 # llama2 "." token
 ]
 whiten_rewards: False
 # GAE hyperparameters
