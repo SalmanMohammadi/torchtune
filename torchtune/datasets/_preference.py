@@ -4,13 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import numpy as np
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
 from torchtune.data import ChosenRejectedToMessages, CROSS_ENTROPY_IGNORE_IDX
+from torchtune.datasets._packed import PackedDataset
 
 from torchtune.modules.tokenizers import ModelTokenizer
 from torchtune.modules.transforms import Transform
@@ -150,8 +151,9 @@ def preference_dataset(
     train_on_input: bool = False,
     new_system_prompt: Optional[str] = None,
     split: str = "train",
+    packed: bool = False,
     **load_dataset_kwargs: Dict[str, Any],
-) -> PreferenceDataset:
+) -> Union[PreferenceDataset, PackedDataset]:
     """
     Configures a custom preference dataset comprising interactions between user and
     model assistant.
@@ -216,6 +218,7 @@ def preference_dataset(
             any system messages already present in the dataset. Default is None.
         split (str): ``split`` argument for ``datasets.load_dataset``. You can use this argument to load a subset
             of a given split, e.g. ``split="train[:10%]"``. Default is "train".
+        packed (bool): Whether or not to pack the dataset to ``max_seq_len`` prior to training. Default is False.
         **load_dataset_kwargs (Dict[str, Any]): additional keyword arguments to pass to ``load_dataset``.
 
     Examples:
@@ -278,7 +281,10 @@ def preference_dataset(
 
 
     Returns:
-        PreferenceDataset: The preference dataset built from source paired data.
+        Union[PreferenceDataset, PackedDataset]: The configured :class:`~torchtune.datasets.PreferenceDataset`
+            or :class:`~torchtune.datasets.PackedDataset` if ``packed=True``.
+    Raises:
+        ValueError: If ``packed`` is True and ``max_seq_len`` is not set on the tokenizer.
     """
 
     message_transform = ChosenRejectedToMessages(
@@ -287,10 +293,17 @@ def preference_dataset(
         new_system_prompt=new_system_prompt,
     )
 
-    return PreferenceDataset(
+    ds = PreferenceDataset(
         source=source,
         message_transform=message_transform,
         tokenizer=tokenizer,
         split=split,
         **load_dataset_kwargs,
     )
+    if packed:
+        if tokenizer.max_seq_len is None:
+            raise ValueError(
+                "PackedDataset requires a max_seq_len to be set on the tokenizer."
+            )
+        return PackedDataset(ds, max_seq_len=tokenizer.max_seq_len)
+    return ds

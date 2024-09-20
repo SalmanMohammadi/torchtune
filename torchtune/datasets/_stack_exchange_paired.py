@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Union
 
 from torchtune.data import Message
+from torchtune.datasets._packed import PackedDataset
 from torchtune.datasets._preference import PreferenceDataset
 from torchtune.modules.tokenizers import ModelTokenizer
 from torchtune.modules.transforms import Transform
@@ -79,8 +80,9 @@ def stack_exchange_paired_dataset(
     column_map: Optional[Dict[str, str]] = None,
     train_on_input: bool = False,
     split: str = "train",
+    packed: bool = False,
     **load_dataset_kwargs: Dict[str, Any],
-) -> PreferenceDataset:
+) -> Union[PreferenceDataset, PackedDataset]:
     """
     Family of preference datasets similar to the `Stack Exchange Paired dataset
     <https://huggingface.co/datasets/lvwerra/stack-exchange-paired>`_.
@@ -102,10 +104,15 @@ def stack_exchange_paired_dataset(
         train_on_input (bool): Whether the model is trained on the prompt or not. Default is False.
         split (str): ``split`` argument for ``datasets.load_dataset``. You can use this argument to load a subset
             of a given split, e.g. ``split="train[:10%]"``. Default is "train".
+        packed (bool): Whether or not to pack the dataset to tokenizer's ``max_seq_len`` prior to training. Default is False.
         **load_dataset_kwargs (Dict[str, Any]): additional keyword arguments to pass to ``load_dataset``.
 
     Returns:
-        PreferenceDataset: The preference dataset built from source paired data.
+        Union[PreferenceDataset, PackedDataset]: The configured :class:`~torchtune.datasets.PreferenceDataset`
+            or :class:`~torchtune.datasets.PackedDataset` if ``packed=True``.
+
+    Raises:
+        ValueError: If ``packed`` is True and ``max_seq_len`` is not set on the tokenizer.
     """
 
     column_map = column_map or {
@@ -118,7 +125,7 @@ def stack_exchange_paired_dataset(
         train_on_input=train_on_input, column_map=column_map
     )
 
-    return PreferenceDataset(
+    ds = PreferenceDataset(
         source=source,
         message_transform=message_transform,
         tokenizer=tokenizer,
@@ -126,3 +133,10 @@ def stack_exchange_paired_dataset(
         data_dir="data/rl",
         **load_dataset_kwargs,
     )
+    if packed:
+        if tokenizer.max_seq_len is None:
+            raise ValueError(
+                "PackedDataset requires a max_seq_len to be set on the tokenizer."
+            )
+        return PackedDataset(ds, max_seq_len=tokenizer.max_seq_len)
+    return ds

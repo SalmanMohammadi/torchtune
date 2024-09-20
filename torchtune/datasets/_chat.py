@@ -243,6 +243,7 @@ def chat_dataset(
 
     Raises:
         ValueError: if the conversation format is not supported
+        ValueError: If ``packed`` is True and ``max_seq_len`` is not set on the tokenizer.
     """
     if conversation_style == "sharegpt":
         message_transform = ShareGPTToMessages(
