@@ -11,6 +11,7 @@ from torchtune._cli.download import Download
 from torchtune._cli.ls import List
 from torchtune._cli.run import Run
 from torchtune._cli.validate import Validate
+from torchtune._cli.upload import Upload
 
 
 class TuneCLIParser:
@@ -33,6 +34,7 @@ class TuneCLIParser:
         Copy.create(subparsers)
         Run.create(subparsers)
         Validate.create(subparsers)
+        Upload.create(subparsers)
 
     def parse_args(self) -> argparse.Namespace:
         """Parse CLI arguments"""

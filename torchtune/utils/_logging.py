@@ -8,8 +8,11 @@ import logging
 import warnings
 from functools import lru_cache, wraps
 from typing import Callable, Optional, TypeVar
-
+from omegaconf import DictConfig, OmegaConf
 from torch import distributed as dist
+import sys
+import importlib, torchao
+import datasets
 
 T = TypeVar("T", bound=type)
 
@@ -68,8 +71,7 @@ def deprecated(msg: str = "") -> Callable[[T], T]:
     @lru_cache(maxsize=1)
     def warn(obj):
         warnings.warn(
-            f"{obj.__name__} is deprecated and will be removed in future versions. "
-            + msg,
+            f"{obj.__name__} is deprecated and will be removed in future versions. " + msg,
             category=FutureWarning,
             stacklevel=3,
         )
@@ -99,3 +101,21 @@ def log_rank_zero(logger: logging.Logger, msg: str, level: int = logging.INFO) -
     if rank != 0:
         return
     logger.log(level, msg)
+
+
+from pathlib import Path
+import json
+
+
+def write_recipe_artefacts_to_output_dir_rank_zero(cfg: DictConfig):
+    rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+    if rank != 0:
+        return
+    OmegaConf.save(cfg, Path(cfg.output_dir) / "config.yaml")
+    recipe_metadata = {}
+    recipe_metadata["sys_argv"] = sys.argv
+    recipe_metadata["torchtune_version"] = importlib.metadata.version("torchtune")
+    recipe_metadata["torchao_version"] = torchao.__version__
+    recipe_metadata["datasets_version"] = datasets.__version__
+    with open(Path(cfg.output_dir) / "meta.json", "w") as f:
+        json.dump(recipe_metadata, f)
