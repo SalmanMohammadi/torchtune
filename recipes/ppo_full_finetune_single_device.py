@@ -7,6 +7,7 @@
 import math
 import os
 import sys
+import time
 from functools import partial
 from itertools import chain
 from typing import Any, Dict, List, Optional, Tuple
@@ -616,9 +617,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if not self._optimizer_in_bwd:
                 policy_ckpt_dict[training.OPT_KEY] = self._optimizer.state_dict()
             else:
-                policy_ckpt_dict[
-                    training.OPT_KEY
-                ] = self._optim_ckpt_wrapper.state_dict()
+                policy_ckpt_dict[training.OPT_KEY] = (
+                    self._optim_ckpt_wrapper.state_dict()
+                )
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
@@ -834,12 +835,15 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             for _, batch in enumerate(self._dataloader):
                 batch = batch["tokens"].to(self._device)
                 _, context_length = batch.shape
+                num_tokens = batch.numel()
 
                 # step 1. generate the trajectory using:
                 # - the current policy (pi_theta)
                 # - the current value function (V_phi)
                 # - the reference frozen policy model (pi_theta_0)
+                t0_traj = time.perf_counter()
                 trajectory = self.generate_trajectory_batched(batch)
+                traj_time = time.perf_counter() - t0_traj
 
                 # step 2. get the rewards for the current trajectory. these are based on:
                 #   - the divergence between the current policy and the reference policy
@@ -862,6 +866,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 )
 
                 # step 4. optimise using the PPO objective over multiple epochs
+                t0_ppo = time.perf_counter()
                 ppo_stats: List[PPOStats] = []
                 for _ in range(self._ppo_epochs):
                     batch_idxs = torch.randperm(self.batch_size, device=self._device)
@@ -903,6 +908,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                             self._optimizer.zero_grad(set_to_none=True)
 
                         self.global_step += 1
+                ppo_time = time.perf_counter() - t0_ppo
 
                 # step 5. profit
                 self._steps_run += 1
@@ -912,6 +918,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                         PPOStats(*map(torch.stack, zip(*ppo_stats))),
                         kl,
                         kl_rewards,
+                        num_tokens / traj_time,
+                        num_tokens / ppo_time,
                     )
                 self.cleanup_after_step(
                     trajectory, ppo_stats, advantages, returns, kl, kl_rewards
@@ -1017,6 +1025,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         ppo_stats: PPOStats,
         kl: torch.Tensor,
         kl_rewards: torch.Tensor,
+        tokens_per_second_trajectory: torch.Tensor,
+        tokens_per_second_loss: torch.Tensor,
     ) -> None:
         """
         Log metrics and statistics for the current step to the metric logger.
@@ -1034,6 +1044,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             "ratios": ppo_stats.ratios.mean(),
             "approx_policy_kl": ppo_stats.approx_policy_kls.mean(),
             "response_lengths": trajectory.seq_lens.float().mean(),
+            "tokens_per_second_per_gpu_trajectory": tokens_per_second_trajectory,
+            "tokens_per_second_per_gpu_loss": tokens_per_second_loss,
         }
         if self._device.type == "cuda" and self._log_peak_memory_stats:
             log_dict.update(training.get_memory_stats(device=self._device))
