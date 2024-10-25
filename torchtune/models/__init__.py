@@ -11,13 +11,17 @@ from torchtune.config._utils import _get_component_from_path
 from torchtune.modules.peft import DoRALinear, LoRALinear
 
 
-def classifier_model(num_classes, base_model, base_model_config):
-    model = _get_component_from_path(base_model)(**base_model_config)
+def classifier_model(num_classes, base_model:str, 
+                     **model_kwargs):
+    model = _get_component_from_path(base_model)(**model_kwargs)
+    embed_dim = model.head_dim * model.num_heads
+    model.output = nn.Linear(embed_dim, num_classes, bias=False)
     return model
 
 
 def lora_classifier_model(
     num_classes,
+    base_model: str,
     apply_lora_to_output: bool = False,
     *,
     lora_rank: int = 8,
@@ -28,9 +32,7 @@ def lora_classifier_model(
 ):
     if model_kwargs.get("apply_lora_to_output", False):
         model_kwargs.pop("apply_lora_to_output")
-        print("Applying LoRA to new output layer!")
-    base_model_path = model_kwargs.pop("base_model")
-    model = _get_component_from_path(base_model_path)(
+    model = _get_component_from_path(base_model)(
         lora_rank=lora_rank,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,

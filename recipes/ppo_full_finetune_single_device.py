@@ -119,6 +119,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
         self._log_peak_memory_stats = cfg.get("log_peak_memory_stats", False)
 
+        if self._log_peak_memory_stats and self._device.type != "cuda":
+            log.info(
+                "log_peak_memory_stats was set to True, however, training does not use cuda. Setting log_peak_memory_stats=False."
+            )
+            self._log_peak_memory_stats = False
+
         # These are public properties which are updated by the checkpoint loader
         # when ``resume_from_checkpoint`` is `True` or validated in tests
         self.seed = training.set_seed(seed=cfg.seed)
@@ -169,8 +175,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # ``_setup_model`` handles initialization and loading the state dict. This method
         # should be called before ``_setup_optimizer`` since transforming the optimizer
         # state dict requires the model
-        self._model_compile = cfg.compile
+        self._compile = cfg.compile
         self._optimizer_in_bwd = cfg.optimizer_in_bwd
+
         (
             self._policy_model,
             self._value_model,
@@ -180,7 +187,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             cfg_model=cfg.policy_model,
             cfg_reward_value_model=cfg.reward_and_value_model,
             enable_activation_checkpointing=cfg.enable_activation_checkpointing,
-            compile_model=self._model_compile,
+            compile_model=self._compile,
             policy_state_dict=policy_model_checkpoint_dict[training.MODEL_KEY],
             ref_policy_state_dict=ref_policy_state_dict[training.MODEL_KEY],
             value_model_state_dict=value_model_checkpoint_dict[training.MODEL_KEY],
@@ -417,6 +424,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             reward_model = config.instantiate(cfg_reward_value_model)
             value_model = config.instantiate(cfg_reward_value_model)
 
+        if compile_model:
+            training.compile_model(policy_model)
+            training.compile_model(ref_policy_model)
+            training.compile_model(reward_model)
+            training.compile_model(value_model)
+
         if enable_activation_checkpointing:
             training.set_activation_checkpointing(
                 policy_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
@@ -444,6 +457,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         value_model.load_state_dict(value_model_state_dict)
 
         # Validate models were loaded in with the expected dtype.
+
         training.validate_expected_param_dtype(
             value_model.named_parameters(), dtype=self._dtype
         )
@@ -483,16 +497,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         for p in ref_policy_model.parameters():
             p.requires_grad = False
-
-        # Compile model, if enabled.
-        if compile_model:
-            backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
-            log.info("Compiling models with torch.compile...")
-
-            policy_model.compile(backend=backend)
-            reward_model.compile(backend=backend)
-            ref_policy_model.compile(backend=backend)
-            value_model.compile(backend=backend)
 
         if self._device.type == "cuda":
             memory_stats = training.get_memory_stats(device=self._device)
@@ -616,9 +620,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if not self._optimizer_in_bwd:
                 policy_ckpt_dict[training.OPT_KEY] = self._optimizer.state_dict()
             else:
-                policy_ckpt_dict[
-                    training.OPT_KEY
-                ] = self._optim_ckpt_wrapper.state_dict()
+                policy_ckpt_dict[training.OPT_KEY] = (
+                    self._optim_ckpt_wrapper.state_dict()
+                )
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
