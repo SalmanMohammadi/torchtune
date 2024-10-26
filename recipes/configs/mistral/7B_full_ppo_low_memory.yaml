@@ -137,6 +137,7 @@ optimizer:
 optimizer_in_bwd: True
 log_peak_memory_stats: False
 enable_activation_checkpointing: True
+enable_kv_cache: True
 
 # Reduced precision
 dtype: bf16
