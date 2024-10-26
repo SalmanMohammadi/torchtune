@@ -21,11 +21,18 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torchtune import config, generation, modules, rlhf, training, utils
 from torchtune.data import padded_collate
 from torchtune.datasets import ConcatDataset
+from torchtune.modules import disable_kv_cache
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.rlhf import PPOStats, Trajectory
 from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
+import torch
+
+torch._logging.set_logs(
+    # recompiles=True,
+    graph_breaks=True,
+)
 
 
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
@@ -33,8 +40,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     Full finetuning recipe for RLHF with PPO for dense transformer-based LLMs such as LLama2. This recipe is optimized
     for single GPU training. Training on CPU is not supported.
 
-    This implementation is based on `Learning to summarize from human feedback <https://arxiv.org/abs/2009.01325`_ and
-    `Training a Helpful and Harmless Assistant with Reinforcement Learning from Human Feedback <https://arxiv.org/abs/2204.05862`_.
+    This implementation is based on `Learning to summarize from human feedback <https://arxiv.org/abs/2009.01325>`_ and
+    `Training a Helpful and Harmless Assistant with Reinforcement Learning from Human Feedback <https://arxiv.org/abs/2204.05862>`_.
 
     Features:
         - Activation Checkpointing. This can be controlled using the ``activation_checkpointing``
@@ -225,6 +232,29 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._setup_training_parameters(cfg)
         self._setup_training_hyperparameters(cfg)
 
+        if self.enable_kv_cache:
+            with self._device:
+                self._policy_model.setup_caches(
+                    batch_size=self._forward_batch_size,
+                    dtype=self._dtype,
+                    decoder_max_seq_len=self._tokenizer.max_seq_len,
+                )
+
+        if self._compile:
+            backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
+            self.generate_next_token = torch.compile(
+                generation.generate_next_token, backend=backend, mode="reduce-overhead"
+            )
+            self.estimate_trajectory = torch.compile(
+                self.estimate_trajectory, backend=backend
+            )
+            self.ppo_step = torch.compile(
+                self.ppo_step,
+                backend=backend,
+            )
+        else:
+            self.generate_next_token = generation.generate_next_token
+
         if self._resume_from_checkpoint:
             self._update_recipe_state(policy_model_checkpoint_dict)
 
@@ -297,6 +327,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._ppo_backward_batch_size = (
             cfg.ppo_batch_size // self._gradient_accumulation_steps
         )
+        self.enable_kv_cache = cfg.enable_kv_cache
 
         if self.batch_size % self._forward_batch_size != 0:
             raise ValueError(
@@ -426,10 +457,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             value_model = config.instantiate(cfg_reward_value_model)
 
         if compile_model:
-            training.compile_model(policy_model)
+            # we can compile the frozen models without any issues
+            # since we won't run into recompilations when changing grad state
             training.compile_model(ref_policy_model)
             training.compile_model(reward_model)
-            training.compile_model(value_model)
 
         if enable_activation_checkpointing:
             training.set_activation_checkpointing(
@@ -666,22 +697,22 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "Are you sure you passed in the right recipe checkpoint?"
             )
 
-    def generate_trajectory(self, input_ids: torch.Tensor) -> Trajectory:
+    def estimate_trajectory(
+        self, input_ids: torch.Tensor, query_responses, logits
+    ) -> Trajectory:
         """
-        Generates a trajectory given the current policy and value models, the reference policy model, the reward model,
-        and batch of inputs. This is done over the following steps:
+        Estimates logprobs, rewards, and values over a given trajectory. This is done over the following steps:
 
-        1: Generate responses, and logits corresponding to the responses using the current policy,
-            generating (query, response) pairs.
-        2. Estimate logprobs of the generated responses using the current policy.
-        3. Estimate values from the generated responses using the current value function.
-        4. Replace any tokens in the response after the first stop token (usually EOS token) with padding,
+        1. Estimate logprobs of the generated responses using the current policy.
+        2. Estimate values from the generated responses using the current value function.
+        3. Replace any tokens in the response after the first stop token (usually EOS token) with padding,
             producting truncated responses.
-        5. Run the reward model on the (query, truncated-response) pairs.
-        6. Mask out all the invalid values in the trajectory due to padding tokens.
+        4. Run the reward model on the (query, truncated-response) pairs.
+        5. Mask out all the invalid values in the trajectory due to padding tokens.
 
         Args:
             input_ids (torch.Tensor): tensor of input token IDs with shape [b, seq_length]
+            query_responses (torch.Tensor): tensor of
 
         Returns:
             Trajectory: An instance of :class:`~torchtune.rlhf.Trajectory` comprising
@@ -689,16 +720,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         batch_size, context_length = input_ids.shape
 
-        # step 1: generate responses, and logits corresponding to the responses using the current policy
-        query_responses, logits = generation.generate(
-            model=self._policy_model,
-            prompt=input_ids,
-            max_generated_tokens=self._max_generated_tokens,
-            temperature=self._temperature,
-            top_k=self._top_k,
-            pad_id=self._tokenizer.pad_id,
-            rng=self._rng,
-        )
+        input_ids = query_responses[:, :context_length]
 
         responses = query_responses[:, context_length:].clone()
         query_response_padding_masks = query_responses != self._tokenizer.pad_id
@@ -813,14 +835,29 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 batch_input_ids = input_ids[
                     batch_start : batch_start + self._forward_batch_size
                 ]
-                trajectories.append(self.generate_trajectory(batch_input_ids))
+                # step 1: generate responses, and logits corresponding to the responses using the current policy
+                query_responses, logits = generation.generate(
+                    model=self._policy_model,
+                    prompt=batch_input_ids,
+                    max_generated_tokens=self._max_generated_tokens,
+                    temperature=self._temperature,
+                    custom_generate_next_token=self.generate_next_token,
+                    top_k=self._top_k,
+                    pad_id=self._tokenizer.pad_id,
+                    rng=self._rng,
+                )
+                if self.enable_kv_cache:
+                    self._policy_model.reset_caches()
+                trajectories.append(
+                    self.estimate_trajectory(batch_input_ids, query_responses, logits)
+                )
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
     def train(self) -> None:
         """
         The core training loop."""
 
-        if self._model_compile:
+        if self._compile:
             log.info(
                 "NOTE: torch.compile is enabled and model is compiled in first forward."
                 "Expect a relatively slow first iteration."
@@ -895,14 +932,16 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                     trajectory,
                                 )
                             )
-                            batch_ppo_stats.append(
-                                self._ppo_step(
+                            # perform a backward pass using the current batch
+                            with disable_kv_cache(self._policy_model):
+                                stats = self.ppo_step(
                                     batch_trajectory,
                                     advantages[backward_batch_idxs],
                                     returns[backward_batch_idxs],
                                     context_length,
                                 )
-                            )
+                                stats.loss.backward()
+                            batch_ppo_stats.append(stats)
                             del batch_trajectory
 
                         ppo_stats.append(PPOStats(*map(sum, zip(*batch_ppo_stats))))
@@ -942,7 +981,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if training_completed:
                 return
 
-    def _ppo_step(
+    def ppo_step(
         self,
         trajectory: Trajectory,
         advantages: torch.Tensor,
@@ -1007,7 +1046,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         loss /= self._gradient_accumulation_steps
-        loss.backward()
 
         with torch.no_grad():
             approx_policy_kls = (

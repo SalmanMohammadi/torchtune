@@ -99,6 +99,6 @@ conf = DictConfig(
     }
 )
 
-torch.set_default_device(torch.device("mps"))
-torch.set_default_dtype(torch.bfloat16)
-model = config.instantiate(conf["model"])
+# torch.set_default_device(torch.device("mps"))
+# torch.set_default_dtype(torch.bfloat16)
+# model = config.instantiate(conf["model"])

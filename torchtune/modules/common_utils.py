@@ -12,6 +12,7 @@ from functools import partial
 from typing import Any, Dict, Generator, Optional, Tuple
 from warnings import warn
 
+from torchtune.utils._logging import get_logger, log_once
 import torch
 
 import torch.nn as nn
@@ -222,11 +223,11 @@ def disable_kv_cache(model: nn.Module) -> Generator[None, None, None]:
         ValueError: If the model does not have caches setup. Use :func:`~torchtune.modules.TransformerDecoder.setup_caches` to
             setup caches first.
     """
-    if not model.caches_are_setup():
-        raise ValueError(
-            "Model caches must be setup before calling disable_kv_cache! "
-            "Please use model.setup_caches() to setup model caches."
-        )
+    # if not model.caches_are_setup():
+    #     raise ValueError(
+    #         "Model caches must be setup before calling disable_kv_cache! "
+    #         "Please use model.setup_caches() to setup model caches."
+    #     )
     if not model.caches_are_enabled():
         warn(
             "You are using disable_kv_cache with a model that does not "
