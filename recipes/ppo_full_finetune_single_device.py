@@ -237,7 +237,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 self._policy_model.setup_caches(
                     batch_size=self._forward_batch_size,
                     dtype=self._dtype,
-                    decoder_max_seq_len=self._tokenizer.max_seq_len,
+                    decoder_max_seq_len=self._tokenizer.max_seq_len + self._max_generated_tokens,
                 )
 
         if self._compile:
@@ -720,7 +720,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         """
         batch_size, context_length = input_ids.shape
 
-        input_ids = query_responses[:, :context_length]
+        input_ids = query_responses[:, :context_length].clone()
 
         responses = query_responses[:, context_length:].clone()
         query_response_padding_masks = query_responses != self._tokenizer.pad_id
