@@ -835,6 +835,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 batch_input_ids = input_ids[
                     batch_start : batch_start + self._forward_batch_size
                 ]
+                
                 # step 1: generate responses, and logits corresponding to the responses using the current policy
                 query_responses, logits = generation.generate(
                     model=self._policy_model,
