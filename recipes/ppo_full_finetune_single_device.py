@@ -10,7 +10,7 @@ import sys
 import time
 from functools import partial
 from itertools import chain
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from warnings import warn
 
 import torch
@@ -24,6 +24,7 @@ from torchtune.datasets import ConcatDataset
 from torchtune.modules import disable_kv_cache
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.rlhf import PPOStats, Trajectory
+from torchtune.training import DummyProfiler, PROFILER_KEY
 from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
@@ -266,6 +267,77 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             * (self.batch_size // self._ppo_batch_size)
         )
 
+        # Set up profiler, returns DummyProfiler (nullcontext object with no-op `step` method)
+        # if cfg is missing profiler key or if `cfg.profiler.enabled = False`
+        self._profiler = self._setup_profiler(cfg.get(PROFILER_KEY, None))
+
+    def _setup_profiler(
+        self, cfg_profiler: Optional[DictConfig] = None
+    ) -> Union[torch.profiler.profile, DummyProfiler]:
+        """
+        Parses the `profiler` section of top-level `cfg` and sets up profiler
+
+        Args:
+            cfg_profiler (Optional[DictConfig]): ``profiler`` section of the top-level ``cfg`` (the main config passed to
+                `recipe.main`). Default None.
+
+        Returns:
+            profiler: Union[torch.profiler.profile, DummyProfiler] - DummyProfiler is a nullcontext with no-op methods
+            for `start`, `stop`, and `step` that can be used in place of `torch.profiler.profile` if profiler is not enabled such
+            that the instrumented training loop does not need to be changed profiling is disabled.
+
+        The profiler config can be provided in configs under the `profiler` key with the following layout:
+
+        .. code-block:: yaml
+            profiler:
+                enabled: bool
+
+                #Output directory of trace artifacts
+                output_dir: str
+
+            #`torch.profiler.ProfilerActivity` types to trace
+            cpu: bool
+            cuda: bool
+
+                #Trace options
+                profile_memory: bool
+                with_stack: bool
+                record_shapes: bool
+                with_flops: bool
+
+            # `torch.profiler.schedule` options:
+            # wait_steps -> wait, warmup_steps -> warmup, active_steps -> active, num_cycles -> repeat
+            wait_steps: int
+            warmup_steps: int
+            active_steps: int
+            num_cycles: int
+        """
+
+        # Missing profiler section in config, assume disabled
+        if cfg_profiler is None:
+            cfg_profiler = DictConfig({"enabled": False})
+
+        # Check that component is included and set correctly
+        if cfg_profiler.get("_component_", None) is None:
+            cfg_profiler["_component_"] = "torchtune.training.setup_torch_profiler"
+        else:
+            assert (
+                cfg_profiler.get("_component_")
+                == "torchtune.training.setup_torch_profiler"
+            ), "Only torch profiler supported currently: component must be `torchtune.training.setup_torch_profiler`"
+
+        profiler, profiler_cfg = config.instantiate(cfg_profiler)
+
+        log.info(f" Profiler config after instantiation: {profiler_cfg}")
+
+        self.profiler_profile_memory = profiler_cfg.get("profile_memory", False)
+        if profiler_cfg["enabled"]:
+            self.profiler_wait_steps = profiler_cfg["wait_steps"]
+            self.profiler_warmup_steps = profiler_cfg["warmup_steps"]
+            self.profiler_active_steps = profiler_cfg["active_steps"]
+
+        return profiler
+
     def _setup_training_hyperparameters(self, cfg) -> None:
         """
         Sets up the training hyperparameters for the recipe. This includes the GAE hyperparameters,
@@ -462,6 +534,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             # since we won't run into recompilations when changing grad state
             training.compile_model(ref_policy_model)
             training.compile_model(reward_model)
+
 
         if enable_activation_checkpointing:
             training.set_activation_checkpointing(
@@ -874,7 +947,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             # in case shuffle is True
             self._sampler.set_epoch(curr_epoch)
 
-            for _, batch in enumerate(self._dataloader):
+            self._profiler.start()
+            for idx, batch in enumerate(self._dataloader):
                 batch = batch["tokens"].to(self._device)
                 _, context_length = batch.shape
                 num_tokens = batch.numel()
@@ -907,7 +981,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     masks=~trajectory.response_padding_masks,
                 )
 
-                # step 4. optimise using the PPO objective over multiple epochs
+                # # step 4. optimise using the PPO objective over multiple epochs
                 t0_ppo = time.perf_counter()
                 ppo_stats: List[PPOStats] = []
                 for _ in range(self._ppo_epochs):
@@ -969,6 +1043,22 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     trajectory, ppo_stats, advantages, returns, kl, kl_rewards
                 )
                 pbar.update(1)
+
+                # Stop tracking CUDA memory now that active steps are complete
+                if (
+                    curr_epoch == 0
+                    and self.profiler_profile_memory
+                    and idx
+                    == self.profiler_wait_steps
+                    + self.profiler_warmup_steps
+                    + self.profiler_active_steps
+                ):
+                    torch.cuda.memory._record_memory_history(enabled=None)
+                # Step the profiler
+                # Note we are stepping each batch, which might not include optimizer step in the trace
+                # if the schedule cycle doesn't align with gradient accumulation.
+                self._profiler.step()
+                
                 if self._steps_run == self._total_steps:
                     training_completed = True
                     break
@@ -980,7 +1070,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 curr_epoch, is_intermediate_checkpoint=not training_completed
             )
             if training_completed:
+                self._profiler.stop()
                 return
+        
+        self._profiler.stop()
 
     def ppo_step(
         self,
