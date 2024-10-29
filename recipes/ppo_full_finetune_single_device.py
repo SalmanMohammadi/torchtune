@@ -237,7 +237,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 self._policy_model.setup_caches(
                     batch_size=self._forward_batch_size,
                     dtype=self._dtype,
-                    decoder_max_seq_len=self._tokenizer.max_seq_len + self._max_generated_tokens,
+                    decoder_max_seq_len=self._tokenizer.max_seq_len
+                    + self._max_generated_tokens,
                 )
 
         if self._compile:
@@ -652,9 +653,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if not self._optimizer_in_bwd:
                 policy_ckpt_dict[training.OPT_KEY] = self._optimizer.state_dict()
             else:
-                policy_ckpt_dict[training.OPT_KEY] = (
-                    self._optim_ckpt_wrapper.state_dict()
-                )
+                policy_ckpt_dict[
+                    training.OPT_KEY
+                ] = self._optim_ckpt_wrapper.state_dict()
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
@@ -697,9 +698,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "Are you sure you passed in the right recipe checkpoint?"
             )
 
-    def estimate_trajectory(
-        self, query_responses, logits
-    ) -> Trajectory:
+    def estimate_trajectory(self, query_responses, logits) -> Trajectory:
         """
         Estimates logprobs, rewards, and values over a given trajectory. This is done over the following steps:
 
@@ -835,7 +834,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 batch_input_ids = input_ids[
                     batch_start : batch_start + self._forward_batch_size
                 ]
-                
+
                 # step 1: generate responses, and logits corresponding to the responses using the current policy
                 query_responses, logits = generation.generate(
                     model=self._policy_model,
@@ -852,9 +851,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
                 if self.enable_kv_cache:
                     self._policy_model.reset_caches()
-                trajectories.append(
-                    self.estimate_trajectory(query_responses, logits)
-                )
+                trajectories.append(self.estimate_trajectory(query_responses, logits))
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
     def train(self) -> None:
