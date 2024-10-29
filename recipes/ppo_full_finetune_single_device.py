@@ -698,7 +698,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             )
 
     def estimate_trajectory(
-        self, input_ids: torch.Tensor, query_responses, logits
+        self, query_responses, logits
     ) -> Trajectory:
         """
         Estimates logprobs, rewards, and values over a given trajectory. This is done over the following steps:
@@ -718,10 +718,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             Trajectory: An instance of :class:`~torchtune.rlhf.Trajectory` comprising
                 the current trajectory.
         """
-        batch_size, context_length = input_ids.shape
 
         input_ids = query_responses[:, :context_length].clone()
 
+        batch_size, context_length = input_ids.shape
         responses = query_responses[:, context_length:].clone()
         query_response_padding_masks = query_responses != self._tokenizer.pad_id
 
@@ -846,10 +846,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     pad_id=self._tokenizer.pad_id,
                     rng=self._rng,
                 )
+
+                del batch_input_ids
+
                 if self.enable_kv_cache:
                     self._policy_model.reset_caches()
                 trajectories.append(
-                    self.estimate_trajectory(batch_input_ids, query_responses, logits)
+                    self.estimate_trajectory(query_responses, logits)
                 )
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
