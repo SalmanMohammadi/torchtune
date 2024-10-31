@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torchtune import config, generation, modules, rlhf, training, utils
 from torchtune.data import padded_collate
 from torchtune.datasets import ConcatDataset
-from torchtune.modules import disable_kv_cache
+from torchtune.modules import disable_kv_cache, local_kv_cache
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.rlhf import PPOStats, Trajectory
 from torchtune.training import DummyProfiler, PROFILER_KEY
@@ -31,7 +31,7 @@ log = utils.get_logger("DEBUG")
 import torch
 
 torch._logging.set_logs(
-    # recompiles=True,
+    recompiles=True,
     graph_breaks=True,
 )
 
@@ -124,6 +124,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             )
 
         # logging attributes
+        self._dtype = torch.float16
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
         self._log_peak_memory_stats = cfg.get("log_peak_memory_stats", False)
@@ -233,23 +234,27 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._setup_training_parameters(cfg)
         self._setup_training_hyperparameters(cfg)
 
-        if self.enable_kv_cache:
-            with self._device:
-                self._policy_model.setup_caches(
-                    batch_size=self._forward_batch_size,
-                    dtype=self._dtype,
-                    decoder_max_seq_len=self._tokenizer.max_seq_len
-                    + self._max_generated_tokens,
-                )
+        # if self.enable_kv_cache:
+        #     with self._device:
+        #         self._policy_model.setup_caches(
+        #             batch_size=self._forward_batch_size,
+        #             dtype=self._dtype,
+        #             decoder_max_seq_len=self._tokenizer.max_seq_len
+        #             + self._max_generated_tokens,
+        #         )
 
         if self._compile:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
+            self.generate_next_token = generation.generate_next_token
             self.generate_next_token = torch.compile(
-                generation.generate_next_token, backend=backend, mode="reduce-overhead"
+                generation.generate_next_token, backend=backend, dynamic=False
             )
             self.estimate_trajectory = torch.compile(
                 self.estimate_trajectory, backend=backend
             )
+            # self._loss_fn = torch.compile(
+            #     self._loss_fn, backend=backend
+            # )
             self.ppo_step = torch.compile(
                 self.ppo_step,
                 backend=backend,
@@ -529,13 +534,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             reward_model = config.instantiate(cfg_reward_value_model)
             value_model = config.instantiate(cfg_reward_value_model)
 
-        if compile_model:
-            # we can compile the frozen models without any issues
-            # since we won't run into recompilations when changing grad state
-            training.compile_model(ref_policy_model)
-            training.compile_model(reward_model)
-
-
         if enable_activation_checkpointing:
             training.set_activation_checkpointing(
                 policy_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
@@ -771,7 +769,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "Are you sure you passed in the right recipe checkpoint?"
             )
 
-    def estimate_trajectory(self, query_responses, logits) -> Trajectory:
+    def estimate_trajectory(self, input_ids, query_responses, logits) -> Trajectory:
         """
         Estimates logprobs, rewards, and values over a given trajectory. This is done over the following steps:
 
@@ -791,11 +789,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 the current trajectory.
         """
 
-        input_ids = query_responses[:, :context_length].clone()
-
         batch_size, context_length = input_ids.shape
         responses = query_responses[:, context_length:].clone()
         query_response_padding_masks = query_responses != self._tokenizer.pad_id
+
 
         # step 1.1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
         masks = generation.get_causal_mask_from_padding_mask(
@@ -907,24 +904,37 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 batch_input_ids = input_ids[
                     batch_start : batch_start + self._forward_batch_size
                 ]
-
                 # step 1: generate responses, and logits corresponding to the responses using the current policy
-                query_responses, logits = generation.generate(
-                    model=self._policy_model,
-                    prompt=batch_input_ids,
-                    max_generated_tokens=self._max_generated_tokens,
-                    temperature=self._temperature,
-                    custom_generate_next_token=self.generate_next_token,
-                    top_k=self._top_k,
-                    pad_id=self._tokenizer.pad_id,
-                    rng=self._rng,
-                )
-
-                del batch_input_ids
-
                 if self.enable_kv_cache:
-                    self._policy_model.reset_caches()
-                trajectories.append(self.estimate_trajectory(query_responses, logits))
+                    with local_kv_cache(
+                        self._policy_model,
+                        batch_size=self._forward_batch_size,
+                        dtype=self._dtype,
+                        decoder_max_seq_len=self._tokenizer.max_seq_len
+                        + self._max_generated_tokens,
+                        device=self._device):
+                            query_responses, logits = generation.generate(
+                                model=self._policy_model,
+                                prompt=batch_input_ids,
+                                max_generated_tokens=self._max_generated_tokens,
+                                temperature=self._temperature,
+                                custom_generate_next_token=self.generate_next_token,
+                                top_k=self._top_k,
+                                pad_id=self._tokenizer.pad_id,
+                                rng=self._rng,
+                            )
+                else:
+                    query_responses, logits = generation.generate(
+                            model=self._policy_model,
+                            prompt=batch_input_ids,
+                            max_generated_tokens=self._max_generated_tokens,
+                            temperature=self._temperature,
+                            custom_generate_next_token=self.generate_next_token,
+                            top_k=self._top_k,
+                            pad_id=self._tokenizer.pad_id,
+                            rng=self._rng,
+                        )
+                trajectories.append(self.estimate_trajectory(batch_input_ids, query_responses, logits))
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
     def train(self) -> None:
@@ -1008,14 +1018,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 )
                             )
                             # perform a backward pass using the current batch
-                            with disable_kv_cache(self._policy_model):
-                                stats = self.ppo_step(
-                                    batch_trajectory,
-                                    advantages[backward_batch_idxs],
-                                    returns[backward_batch_idxs],
-                                    context_length,
-                                )
-                                stats.loss.backward()
+                            stats = self.ppo_step(
+                                batch_trajectory,
+                                advantages[backward_batch_idxs],
+                                returns[backward_batch_idxs],
+                                context_length,
+                            )
+                            stats.loss.backward()
                             batch_ppo_stats.append(stats)
                             del batch_trajectory
 

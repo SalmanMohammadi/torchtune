@@ -125,7 +125,7 @@ device: cuda
 # Training arguments
 batch_size: 64
 num_steps: 10000
-ppo_epochs: 2
+ppo_epochs: 1
 ppo_batch_size: 32
 gradient_accumulation_steps: 1
 
