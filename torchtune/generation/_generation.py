@@ -354,7 +354,7 @@ def generate(
         # otherwise, we take the whole sequence up to the current position
         if incremental_decoding:
             curr_input_pos = input_pos[:, curr_pos]
-            curr_masks = masks[:, curr_pos, None, :]
+            curr_masks = masks[:, curr_pos, None, :].contiguous()
         else:
             tokens = generated_tokens.clone()
             curr_input_pos = input_pos[:, : curr_pos + 1]

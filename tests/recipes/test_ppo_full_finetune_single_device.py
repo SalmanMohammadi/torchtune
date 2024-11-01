@@ -90,6 +90,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
 
             metric_logger._component_=torchtune.training.metric_logging.DiskLogger \
             metric_logger.filename={log_file} \
+            log_peak_memory_stats=False \
         """.split()
 
         model_config = llama2_test_config()

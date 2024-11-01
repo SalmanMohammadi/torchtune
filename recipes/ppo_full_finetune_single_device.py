@@ -34,6 +34,7 @@ torch._logging.set_logs(
     recompiles=True,
     graph_breaks=True,
 )
+torch.empty(1, device="cuda", requires_grad=True).backward()
 
 
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
@@ -263,20 +264,21 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         if self._compile:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
-            self.generate_next_token = generation.generate_next_token
-            # self.generate_next_token = torch.compile(
-            #     generation.generate_next_token, backend=backend, dynamic=False
-            # )
-            # self.estimate_trajectory = torch.compile(
-            #     self.estimate_trajectory, backend=backend
-            # )
-            # # self._loss_fn = torch.compile(
-            # #     self._loss_fn, backend=backend
+            self.generate_next_token = torch.compile(
+                generation.generate_next_token,
+                backend=backend,
+                dynamic=False,
+                fullgraph=True,
+            )
+            self.estimate_trajectory = torch.compile(
+                self.estimate_trajectory, backend=backend, dynamic=True, fullgraph=True
+            )
+            # self._loss_fn = torch.compile(
+            #     self._loss_fn, backend=backend
             # # )
-            # self.ppo_step = torch.compile(
-            #     self.ppo_step,
-            #     backend=backend,
-            # )
+            self.ppo_step = torch.compile(
+                self.ppo_step, backend=backend, dynamic=True, fullgraph=False
+            )
         else:
             self.generate_next_token = generation.generate_next_token
 
@@ -561,11 +563,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 value_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
             )
 
-        if compile_model:
-            training.compile_model(policy_model)
-            training.compile_model(value_model)
-            training.compile_model(ref_policy_model)
-            training.compile_model(reward_model)
+        # if compile_model:
+        #     training.compile_model(ref_policy_model)
+        #     training.compile_model(reward_model)
 
         policy_model.load_state_dict(policy_state_dict)
         ref_policy_model.load_state_dict(ref_policy_state_dict)
@@ -628,12 +628,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             p.requires_grad = False
 
         # setup activation offloading if specified
-        self.policy_act_ctx = training.get_act_offloading_ctx_manager(
-            policy_model, enable_activation_offloading
-        )
-        self.value_act_ctx = training.get_act_offloading_ctx_manager(
-            value_model, enable_activation_offloading
-        )
+        # self.policy_act_ctx = training.get_act_offloading_ctx_manager(
+        #     policy_model, enable_activation_offloading
+        # )
+        # self.value_act_ctx = training.get_act_offloading_ctx_manager(
+        #     value_model, enable_activation_offloading
+        # )
         if self._device.type == "cuda":
             memory_stats = training.get_memory_stats(device=self._device)
             training.log_memory_stats(memory_stats)
@@ -756,9 +756,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if not self._optimizer_in_bwd:
                 policy_ckpt_dict[training.OPT_KEY] = self._optimizer.state_dict()
             else:
-                policy_ckpt_dict[
-                    training.OPT_KEY
-                ] = self._optim_ckpt_wrapper.state_dict()
+                policy_ckpt_dict[training.OPT_KEY] = (
+                    self._optim_ckpt_wrapper.state_dict()
+                )
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
@@ -801,7 +801,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "Are you sure you passed in the right recipe checkpoint?"
             )
 
-    def estimate_trajectory(self, input_ids, query_responses, logits) -> Trajectory:
+    def estimate_trajectory(
+        self, context_length, query_responses, logits
+    ) -> Trajectory:
         """
         Estimates logprobs, rewards, and values over a given trajectory. This is done over the following steps:
 
@@ -821,10 +823,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 the current trajectory.
         """
 
-        batch_size, context_length = input_ids.shape
+        batch_size = query_responses.shape[0]
+        input_ids = query_responses[:, :context_length]
         responses = query_responses[:, context_length:].clone()
         query_response_padding_masks = query_responses != self._tokenizer.pad_id
-
 
         # step 1.1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
         masks = generation.get_causal_mask_from_padding_mask(
@@ -936,6 +938,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 batch_input_ids = input_ids[
                     batch_start : batch_start + self._forward_batch_size
                 ]
+                context_length = batch_input_ids.shape[1]
                 # step 1: generate responses, and logits corresponding to the responses using the current policy
                 if self.enable_kv_cache:
                     with local_kv_cache(
@@ -944,19 +947,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                         dtype=self._dtype,
                         decoder_max_seq_len=self._tokenizer.max_seq_len
                         + self._max_generated_tokens,
-                        device=self._device):
-                            query_responses, logits = generation.generate(
-                                model=self._policy_model,
-                                prompt=batch_input_ids,
-                                max_generated_tokens=self._max_generated_tokens,
-                                temperature=self._temperature,
-                                custom_generate_next_token=self.generate_next_token,
-                                top_k=self._top_k,
-                                pad_id=self._tokenizer.pad_id,
-                                rng=self._rng,
-                            )
-                else:
-                    query_responses, logits = generation.generate(
+                        device=self._device,
+                    ):
+                        query_responses, logits = generation.generate(
                             model=self._policy_model,
                             prompt=batch_input_ids,
                             max_generated_tokens=self._max_generated_tokens,
@@ -966,7 +959,21 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                             pad_id=self._tokenizer.pad_id,
                             rng=self._rng,
                         )
-                trajectories.append(self.estimate_trajectory(batch_input_ids, query_responses, logits))
+                else:
+                    query_responses, logits = generation.generate(
+                        model=self._policy_model,
+                        prompt=batch_input_ids,
+                        max_generated_tokens=self._max_generated_tokens,
+                        temperature=self._temperature,
+                        custom_generate_next_token=self.generate_next_token,
+                        top_k=self._top_k,
+                        pad_id=self._tokenizer.pad_id,
+                        rng=self._rng,
+                    )
+                del batch_input_ids
+                trajectories.append(
+                    self.estimate_trajectory(context_length, query_responses, logits)
+                )
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
     def train(self) -> None:
@@ -1100,7 +1107,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 # Note we are stepping each batch, which might not include optimizer step in the trace
                 # if the schedule cycle doesn't align with gradient accumulation.
                 self._profiler.step()
-                
+
                 if self._steps_run == self._total_steps:
                     training_completed = True
                     break
@@ -1114,7 +1121,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if training_completed:
                 self._profiler.stop()
                 return
-        
+
         self._profiler.stop()
 
     def ppo_step(
@@ -1144,12 +1151,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         """
         # estimate logprobs from the policy at the current optimisation step
-        with self.policy_act_ctx:
-            pi_logits = self._policy_model(
-                trajectory.query_responses,
-                input_pos=trajectory.position_ids,
-                mask=trajectory.masks,
-            )
+        # with self.policy_act_ctx:
+        pi_logits = self._policy_model(
+            trajectory.query_responses,
+            input_pos=trajectory.position_ids,
+            mask=trajectory.masks,
+        )
         pi_logits = rlhf.truncate_sequence_for_logprobs(pi_logits, context_length)
         pi_logprobs = rlhf.logits_to_logprobs(
             pi_logits, trajectory.query_responses[:, context_length:], self._temperature
@@ -1159,12 +1166,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         del pi_logits
 
         # estimate the values from the value function at the current optimisation step
-        with self.value_act_ctx:
-            phi_values = self._value_model(
-                trajectory.query_responses,
-                input_pos=trajectory.position_ids,
-                mask=trajectory.masks,
-            )
+        # with self.value_act_ctx:
+        phi_values = self._value_model(
+            trajectory.query_responses,
+            input_pos=trajectory.position_ids,
+            mask=trajectory.masks,
+        )
 
         phi_values = rlhf.truncate_sequence_for_logprobs(
             phi_values, context_length
