@@ -135,6 +135,23 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             )
             self._log_peak_memory_stats = False
 
+        # activation checkpointing/offloading
+        self.enable_activation_checkpointing = cfg.enable_activation_checkpointing
+        self.enable_activation_offloading = cfg.enable_activation_offloading
+        if self.enable_activation_offloading:
+            if self._device.type != "cuda":
+                raise RuntimeError(
+                    "enable_activation_offloading should only be True when training on CUDA"
+                )
+            if not self.enable_activation_checkpointing:
+                raise RuntimeError(
+                    "enable_activation_offloading should only be True when enable_activation_checkpointing is True"
+                )
+        elif self.enable_activation_checkpointing:
+            log.info(
+                "Hint: enable_activation_checkpointing is True, but enable_activation_offloading isn't. "
+                "Enabling activation offloading should reduce memory further."
+            )
         # These are public properties which are updated by the checkpoint loader
         # when ``resume_from_checkpoint`` is `True` or validated in tests
         self.seed = training.set_seed(seed=cfg.seed)
@@ -196,7 +213,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         ) = self._setup_models(
             cfg_model=cfg.policy_model,
             cfg_reward_value_model=cfg.reward_and_value_model,
-            enable_activation_checkpointing=cfg.enable_activation_checkpointing,
+            enable_activation_checkpointing=self.enable_activation_checkpointing,
+            enable_activation_offloading=self.enable_activation_offloading,
             compile_model=self._compile,
             policy_state_dict=policy_model_checkpoint_dict[training.MODEL_KEY],
             ref_policy_state_dict=ref_policy_state_dict[training.MODEL_KEY],
@@ -246,19 +264,19 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         if self._compile:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
             self.generate_next_token = generation.generate_next_token
-            self.generate_next_token = torch.compile(
-                generation.generate_next_token, backend=backend, dynamic=False
-            )
-            self.estimate_trajectory = torch.compile(
-                self.estimate_trajectory, backend=backend
-            )
-            # self._loss_fn = torch.compile(
-            #     self._loss_fn, backend=backend
+            # self.generate_next_token = torch.compile(
+            #     generation.generate_next_token, backend=backend, dynamic=False
             # )
-            self.ppo_step = torch.compile(
-                self.ppo_step,
-                backend=backend,
-            )
+            # self.estimate_trajectory = torch.compile(
+            #     self.estimate_trajectory, backend=backend
+            # )
+            # # self._loss_fn = torch.compile(
+            # #     self._loss_fn, backend=backend
+            # # )
+            # self.ppo_step = torch.compile(
+            #     self.ppo_step,
+            #     backend=backend,
+            # )
         else:
             self.generate_next_token = generation.generate_next_token
 
@@ -518,6 +536,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         cfg_model: DictConfig,
         cfg_reward_value_model: DictConfig,
         enable_activation_checkpointing: bool,
+        enable_activation_offloading: bool,
         compile_model: bool,
         policy_state_dict: Dict[str, Any],
         ref_policy_state_dict: Dict[str, Any],
@@ -541,6 +560,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             training.set_activation_checkpointing(
                 value_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
             )
+
+        if compile_model:
+            training.compile_model(policy_model)
+            training.compile_model(value_model)
+            training.compile_model(ref_policy_model)
+            training.compile_model(reward_model)
 
         policy_model.load_state_dict(policy_state_dict)
         ref_policy_model.load_state_dict(ref_policy_state_dict)
@@ -602,6 +627,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         for p in ref_policy_model.parameters():
             p.requires_grad = False
 
+        # setup activation offloading if specified
+        self.policy_act_ctx = training.get_act_offloading_ctx_manager(
+            policy_model, enable_activation_offloading
+        )
+        self.value_act_ctx = training.get_act_offloading_ctx_manager(
+            value_model, enable_activation_offloading
+        )
         if self._device.type == "cuda":
             memory_stats = training.get_memory_stats(device=self._device)
             training.log_memory_stats(memory_stats)
@@ -1018,6 +1050,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 )
                             )
                             # perform a backward pass using the current batch
+                            # with self.policy_act_ctx, self.value_act_ctx:
                             stats = self.ppo_step(
                                 batch_trajectory,
                                 advantages[backward_batch_idxs],
@@ -1111,11 +1144,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         """
         # estimate logprobs from the policy at the current optimisation step
-        pi_logits = self._policy_model(
-            trajectory.query_responses,
-            input_pos=trajectory.position_ids,
-            mask=trajectory.masks,
-        )
+        with self.policy_act_ctx:
+            pi_logits = self._policy_model(
+                trajectory.query_responses,
+                input_pos=trajectory.position_ids,
+                mask=trajectory.masks,
+            )
         pi_logits = rlhf.truncate_sequence_for_logprobs(pi_logits, context_length)
         pi_logprobs = rlhf.logits_to_logprobs(
             pi_logits, trajectory.query_responses[:, context_length:], self._temperature
@@ -1125,11 +1159,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         del pi_logits
 
         # estimate the values from the value function at the current optimisation step
-        phi_values = self._value_model(
-            trajectory.query_responses,
-            input_pos=trajectory.position_ids,
-            mask=trajectory.masks,
-        )
+        with self.value_act_ctx:
+            phi_values = self._value_model(
+                trajectory.query_responses,
+                input_pos=trajectory.position_ids,
+                mask=trajectory.masks,
+            )
 
         phi_values = rlhf.truncate_sequence_for_logprobs(
             phi_values, context_length
