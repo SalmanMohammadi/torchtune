@@ -12,6 +12,7 @@ import torch
 from torch import nn
 from torchtune.utils._import_guard import _SUPPORTS_FLEX_ATTENTION
 from torchtune.utils._logging import get_logger, log_once
+from torchtune.utils._version import torch_version_ge
 
 _log: logging.Logger = get_logger()
 
@@ -34,8 +35,9 @@ if _SUPPORTS_FLEX_ATTENTION:
         k: torch.Tensor,
         v: torch.Tensor,
         block_mask: BlockMask,
+        enable_gqa: bool
     ) -> torch.Tensor:
-        return flex_attention_compiled(q, k, v, block_mask=block_mask)
+        return flex_attention_compiled(q, k, v, block_mask=block_mask, enable_gqa=enable_gqa)
 
     _MaskType = Union[torch.Tensor, BlockMask]
 else:
@@ -173,7 +175,7 @@ def _sdpa_or_flex_attention() -> Callable:
     - torch.cuda.get_device_capability() >= (7, 5)
     """
 
-    if _SUPPORTS_FLEX_ATTENTION:
+    if torch_version_ge("2.5.0"):
 
         def _attention_call(
             q: torch.Tensor,
@@ -182,6 +184,7 @@ def _sdpa_or_flex_attention() -> Callable:
             mask: Optional[_MaskType],
             dropout_p: float,
             is_causal: bool,
+            enable_gqa: bool
         ) -> torch.Tensor:
 
             # Flex attention uses the BlockMask
@@ -190,7 +193,7 @@ def _sdpa_or_flex_attention() -> Callable:
             # we assume the user wants to use flex attention instead of traditional SDPA.
             # This will use flash attention under the hood with support for custom masks.
             # Currently, it is used when sample packing is enabled (see torchtune.datasets.PackedDataset)
-            if isinstance(mask, BlockMask):
+            if _SUPPORTS_FLEX_ATTENTION and isinstance(mask, BlockMask):
                 log_once(
                     _log,
                     "Using flex attention for attention computation since a BlockMask was passed in.",
@@ -213,14 +216,17 @@ def _sdpa_or_flex_attention() -> Callable:
                     mask = mask[:, None, :, :]
 
                 # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
-                return nn.functional.scaled_dot_product_attention(
-                    q,
-                    k,
-                    v,
-                    attn_mask=mask,
-                    dropout_p=dropout_p,
-                    is_causal=is_causal,
-                )
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                    return nn.functional.scaled_dot_product_attention(
+                        q,
+                        k,
+                        v,
+                        attn_mask=mask,
+                        dropout_p=dropout_p,
+                        is_causal=is_causal,
+                        enable_gqa=enable_gqa
+                    )
 
     else:
 
@@ -231,12 +237,24 @@ def _sdpa_or_flex_attention() -> Callable:
             mask: Optional[_MaskType],
             dropout_p: float,
             is_causal: bool,
+            enable_gqa: bool
         ) -> torch.Tensor:
             # shape: [b, 1, s, s]
             if mask is not None:
                 mask = mask[:, None, :, :]
 
+            if enable_gqa:
+                _, num_heads, *_, = q.shape
+                bsz, num_kv_heads, seq_len, head_dim  = v.shape
+                q_per_kv = num_heads // num_kv_heads
+                k = k.unsqueeze(2).expand(bsz, num_kv_heads, q_per_kv, seq_len, head_dim)
+                v = v.unsqueeze(2).expand(bsz, num_kv_heads, q_per_kv, seq_len, head_dim)
+
+                k = k.reshape(bsz, num_heads, seq_len, head_dim)
+                v = v.reshape(bsz, num_heads, seq_len, head_dim)
+
             # Flash attention from https://pytorch.org/blog/accelerating-large-language-models/
+            
             return nn.functional.scaled_dot_product_attention(
                 q,
                 k,

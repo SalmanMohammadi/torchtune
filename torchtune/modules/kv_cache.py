@@ -17,9 +17,7 @@ class KVCache(nn.Module):
     Args:
         batch_size (int): batch size model will be run with
         max_seq_len (int): maximum sequence length model will be run with
-        num_heads (int): number of heads. We take num_heads instead of num_kv_heads because
-            the cache is created after we've expanded the key and value tensors to have the
-            same shape as the query tensor. See attention.py for more details
+        num_heads (int): number of kv-heads. 
         head_dim (int): per-attention head embedding dimension
         dtype (torch.dtype): dtype for the caches
     """
@@ -82,6 +80,12 @@ class KVCache(nn.Module):
             k_val (torch.Tensor): Current key tensor with shape [B, H, S, D]
             v_val (torch.Tensor): Current value tensor with shape [B, H, S, D]
 
+        Notation:
+            B: batch size
+            H: number of kv-heads
+            S: sequence length
+            D: kv-head dim
+
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: Updated key and value cache tensors, respectively.
 
@@ -111,6 +115,6 @@ class KVCache(nn.Module):
         # this allows us to track the current position in the cache
         # after the last update in a compile-friendly way without any dynamism
         # e.g. relying on an int size tracker, or re-creating cache_pos every time
-        self.cache_pos += seq_len
+        self.cache_pos.add_(seq_len)
 
         return k_out, v_out

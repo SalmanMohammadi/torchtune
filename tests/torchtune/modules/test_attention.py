@@ -123,7 +123,7 @@ class TestMultiHeadAttention:
         kv_cache = KVCache(
             batch_size=4,
             max_seq_len=max_seq_len,
-            num_heads=num_heads,
+            num_heads=num_kv_heads,
             head_dim=head_dim,
             dtype=torch.float32,
         )
@@ -178,7 +178,7 @@ class TestMultiHeadAttention:
         kv_cache = KVCache(
             batch_size=4,
             max_seq_len=max_seq_len,
-            num_heads=num_heads,
+            num_heads=num_kv_heads,
             head_dim=head_dim,
             dtype=torch.float32,
         )
@@ -233,7 +233,7 @@ class TestMultiHeadAttention:
         kv_cache = KVCache(
             batch_size=4,
             max_seq_len=max_seq_len,
-            num_heads=num_heads,
+            num_heads=num_kv_heads,
             head_dim=head_dim,
             dtype=torch.float32,
         )

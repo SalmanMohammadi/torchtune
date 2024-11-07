@@ -164,7 +164,7 @@ class MultiHeadAttention(nn.Module):
             self.kv_cache = KVCache(
                 batch_size=batch_size,
                 max_seq_len=max_seq_len,
-                num_heads=self.num_heads,
+                num_heads=self.num_kv_heads,
                 head_dim=self.head_dim,
                 dtype=dtype,
             )
@@ -235,7 +235,7 @@ class MultiHeadAttention(nn.Module):
 
         # number of queries per key/value
         q_per_kv = self.num_heads // self.num_kv_heads
-        q = q.view(b, s_x, self.num_kv_heads * q_per_kv, self.head_dim)
+        q = q.view(b, s_x, -1, self.head_dim)
 
         # Apply positional embeddings
         if self.pos_embeddings is not None:
@@ -262,32 +262,18 @@ class MultiHeadAttention(nn.Module):
             # v has shape [b, s_y, num_kv_heads * head_dim]
             k = self.k_proj(y)
             v = self.v_proj(y)
-
+            
+            # import pdb
+            # pdb.set_trace()
             # Apply positional embeddings
             # k: [b, s_y, n_kv, h_d]
             k = k.view(b, s_y, -1, self.head_dim)
+            v = v.view(b, s_y, -1, self.head_dim)
+
             if self.pos_embeddings is not None:
                 k = self.pos_embeddings(k, input_pos=input_pos)
 
-            # View + expand + reshape bring num_kv_heads to num_heads for k and v
-            # to match q.
-
-            # k: [b, s_y, n_kv, 1, h_d]
-            # v: [b, s_y, n_kv, 1, h_d]
-            k = k.view(b, s_y, self.num_kv_heads, 1, self.head_dim)
-            v = v.view(b, s_y, self.num_kv_heads, 1, self.head_dim)
-
-            # If needed, expand the key and value tensors to have the same shape
-            # as the query tensor by copying values across the relevant dim
-            if self.num_heads != self.num_kv_heads:
-                k = k.expand(b, s_y, self.num_kv_heads, q_per_kv, self.head_dim)
-                v = v.expand(b, s_y, self.num_kv_heads, q_per_kv, self.head_dim)
-
-            # [b, s, n_h, h_d]
-            k = k.reshape(b, s_y, -1, self.head_dim)
-            v = v.reshape(b, s_y, -1, self.head_dim)
-
-            # [b, n_h, s, h_d]
+            # [b, n_kv, s_y, h_d]
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
 
@@ -296,8 +282,22 @@ class MultiHeadAttention(nn.Module):
                 k = self.k_norm(k)
 
             # Update key-value cache
+            # import pdb
+            # pdb.set_trace()
             if self.kv_cache is not None and self.cache_enabled:
                 k, v = self.kv_cache.update(k, v)
+                # s_y = self.kv_cache.k_cache.shape[2]
+
+            # now we have [b, n_kv, s_y, h_d] and we need to expand to [b, n_h, s_y, h_d]
+
+            # # If needed, expand the key and value tensors to have the same shape
+            # # as the query tensor by copying values across the relevant dim
+            # if self.num_heads != self.num_kv_heads:
+            #     import pdb
+            #     pdb.set_trace()
+            #     k = k.repeat_interleave(q_per_kv, dim=1)  # [b, n_h, s_y, h_d]
+            #     v = v.repeat_interleave(q_per_kv, dim=1)  # [b, n_h, s_y, h_d]
+
 
         output = self._attention_call(
             q,
@@ -306,6 +306,7 @@ class MultiHeadAttention(nn.Module):
             mask=mask,
             dropout_p=self.attn_dropout if self.training else 0.0,
             is_causal=self.kv_cache is None and mask is None and self.is_causal,
+            enable_gqa=self.num_heads != self.num_kv_heads
         )
 
         # reshape the output to be the same shape as the input
