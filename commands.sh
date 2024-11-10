@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 tune run ppo_full_finetune_single_device --config mistral/7B_full_ppo_low_memory \
 metric_logger=torchtune.training.metric_logging.WandBLogger \
 metric_logger.project=ppo_v2 \
@@ -10,7 +16,7 @@ value_checkpointer.checkpoint_dir=/workspace/RM-Mistral-7B/ \
 reward_checkpointer.checkpoint_dir=/workspace/RM-Mistral-7B/ \
 log_peak_memory_stats=True \
 tokenizer.max_seq_len=1024 \
-compile=False 
+compile=False
 
 
 -
@@ -27,7 +33,7 @@ value_checkpointer.checkpoint_dir=/workspace/RM-Mistral-7B/ \
 reward_checkpointer.checkpoint_dir=/workspace/RM-Mistral-7B/ \
 log_peak_memory_stats=True \
 tokenizer.max_seq_len=1024 \
-compile=False 
+compile=False
 
 -
 
@@ -43,4 +49,4 @@ value_checkpointer.checkpoint_dir=/workspace/RM-Mistral-7B/ \
 reward_checkpointer.checkpoint_dir=/workspace/RM-Mistral-7B/ \
 log_peak_memory_stats=True \
 tokenizer.max_seq_len=1024 \
-compile=True 
+compile=True
