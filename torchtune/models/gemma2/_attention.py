@@ -149,11 +149,7 @@ class Gemma2Attention(nn.Module):
             self.kv_cache = KVCache(
                 batch_size=batch_size,
                 max_seq_len=max_seq_len,
-<<<<<<< HEAD
-                num_heads=self.num_heads,
-=======
                 num_kv_heads=self.num_heads,
->>>>>>> main
                 head_dim=self.head_dim,
                 dtype=dtype,
             )

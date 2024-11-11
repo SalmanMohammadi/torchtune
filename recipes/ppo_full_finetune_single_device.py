@@ -28,13 +28,12 @@ from torchtune.training import DummyProfiler, PROFILER_KEY
 from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
+import os
+
 import torch
 
-torch._logging.set_logs(
-    recompiles=True,
-    graph_breaks=True,
-)
-torch.empty(1, device="cuda", requires_grad=True).backward()
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=True)
 
 
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
@@ -243,7 +242,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         log.info("Loss is initialized.")
 
         # sampler and dataloader depends on the tokenizer and should be set
-        # setup afterit is initialized
+        # setup after it is initialized
         self._sampler, self._dataloader = self._setup_data(
             cfg_dataset=cfg.dataset,
             shuffle=cfg.shuffle,
@@ -252,15 +251,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         self._setup_training_parameters(cfg)
         self._setup_training_hyperparameters(cfg)
-
-        # if self.enable_kv_cache:
-        #     with self._device:
-        #         self._policy_model.setup_caches(
-        #             batch_size=self._forward_batch_size,
-        #             dtype=self._dtype,
-        #             decoder_max_seq_len=self._tokenizer.max_seq_len
-        #             + self._max_generated_tokens,
-        #         )
 
         if self._compile:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
@@ -271,13 +261,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 fullgraph=True,
             )
             self.estimate_trajectory = torch.compile(
-                self.estimate_trajectory, backend=backend, dynamic=True, fullgraph=True
+                self.estimate_trajectory,
+                backend=backend,
+                fullgraph=True,
             )
-            # self._loss_fn = torch.compile(
-            #     self._loss_fn, backend=backend
-            # # )
-            self.ppo_step = torch.compile(
-                self.ppo_step, backend=backend, dynamic=True, fullgraph=False
+            self._loss_fn = torch.compile(
+                self._loss_fn, backend=backend, fullgraph=True
             )
         else:
             self.generate_next_token = generation.generate_next_token
@@ -563,10 +552,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 value_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
             )
 
-        # if compile_model:
-        #     training.compile_model(ref_policy_model)
-        #     training.compile_model(reward_model)
-
         policy_model.load_state_dict(policy_state_dict)
         ref_policy_model.load_state_dict(ref_policy_state_dict)
 
@@ -627,13 +612,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         for p in ref_policy_model.parameters():
             p.requires_grad = False
 
-        # setup activation offloading if specified
-        # self.policy_act_ctx = training.get_act_offloading_ctx_manager(
-        #     policy_model, enable_activation_offloading
-        # )
-        # self.value_act_ctx = training.get_act_offloading_ctx_manager(
-        #     value_model, enable_activation_offloading
-        # )
         if self._device.type == "cuda":
             memory_stats = training.get_memory_stats(device=self._device)
             training.log_memory_stats(memory_stats)
@@ -719,7 +697,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             dataset=ds,
             sampler=sampler,
             batch_size=batch_size,
-            # dropping last avoids shape issues with compile + flex attention
             drop_last=True,
             collate_fn=partial(
                 padded_collate,
@@ -802,7 +779,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             )
 
     def estimate_trajectory(
-        self, context_length, query_responses, logits
+        self, query_responses, logits, context_length
     ) -> Trajectory:
         """
         Estimates logprobs, rewards, and values over a given trajectory. This is done over the following steps:
@@ -828,7 +805,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         responses = query_responses[:, context_length:].clone()
         query_response_padding_masks = query_responses != self._tokenizer.pad_id
 
-        # step 1.1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
+        # step 1 create attention masks and position IDs for any padding tokens in inputs, used for future forward passes
         masks = generation.get_causal_mask_from_padding_mask(
             query_response_padding_masks
         )
@@ -940,26 +917,14 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 ]
                 context_length = batch_input_ids.shape[1]
                 # step 1: generate responses, and logits corresponding to the responses using the current policy
-                if self.enable_kv_cache:
-                    with local_kv_cache(
-                        self._policy_model,
-                        batch_size=self._forward_batch_size,
-                        dtype=self._dtype,
-                        decoder_max_seq_len=self._tokenizer.max_seq_len
-                        + self._max_generated_tokens,
-                        device=self._device,
-                    ):
-                        query_responses, logits = generation.generate(
-                            model=self._policy_model,
-                            prompt=batch_input_ids,
-                            max_generated_tokens=self._max_generated_tokens,
-                            temperature=self._temperature,
-                            custom_generate_next_token=self.generate_next_token,
-                            top_k=self._top_k,
-                            pad_id=self._tokenizer.pad_id,
-                            rng=self._rng,
-                        )
-                else:
+                with local_kv_cache(
+                    self._policy_model,
+                    batch_size=self._forward_batch_size,
+                    dtype=self._dtype,
+                    decoder_max_seq_len=self._tokenizer.max_seq_len
+                    + self._max_generated_tokens,
+                    device=self._device,
+                ):
                     query_responses, logits = generation.generate(
                         model=self._policy_model,
                         prompt=batch_input_ids,
@@ -970,9 +935,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                         pad_id=self._tokenizer.pad_id,
                         rng=self._rng,
                     )
+
                 del batch_input_ids
                 trajectories.append(
-                    self.estimate_trajectory(context_length, query_responses, logits)
+                    self.estimate_trajectory(query_responses, logits, context_length)
                 )
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
@@ -1057,14 +1023,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 )
                             )
                             # perform a backward pass using the current batch
-                            # with self.policy_act_ctx, self.value_act_ctx:
                             stats = self.ppo_step(
                                 batch_trajectory,
                                 advantages[backward_batch_idxs],
                                 returns[backward_batch_idxs],
                                 context_length,
                             )
-                            stats.loss.backward()
                             batch_ppo_stats.append(stats)
                             del batch_trajectory
 
@@ -1197,6 +1161,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 0.5 * (pi_logprobs - trajectory.logprobs).pow(2)
             ).mean()
 
+        loss.backward()
         return PPOStats(
             loss,
             policy_loss / self._gradient_accumulation_steps,
