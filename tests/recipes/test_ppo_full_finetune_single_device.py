@@ -51,6 +51,7 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
             "optimizer.lr=2e-5",
             "log_every_n_steps=1",
             "compile=False",
+            "log_peak_memory_stats=False",
         ] + dummy_text_completion_alpaca_dataset_config()
 
     @pytest.mark.integration_test
@@ -90,7 +91,6 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
 
             metric_logger._component_=torchtune.training.metric_logging.DiskLogger \
             metric_logger.filename={log_file} \
-            log_peak_memory_stats=False \
         """.split()
 
         model_config = llama2_test_config()
@@ -374,6 +374,9 @@ class TestPPOFullFinetuneSingleDeviceRecipe:
 
         resumed_loss_values = get_loss_values_from_metric_logger(resumed_log_file)
 
+        import pdb
+
+        pdb.set_trace()
         # losses at each step are (loss, policy_loss, value_loss)
         torch.testing.assert_close(
             loss_values[6:], resumed_loss_values, rtol=1e-4, atol=1e-4

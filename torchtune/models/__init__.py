@@ -9,10 +9,10 @@ from omegaconf import DictConfig
 from torchtune.config import instantiate
 from torchtune.config._utils import _get_component_from_path
 from torchtune.modules.peft import DoRALinear, LoRALinear
-
+from functools import partial
 
 def classifier_model(num_classes, base_model: str, **model_kwargs):
-    model = _get_component_from_path(base_model)(**model_kwargs)
+    model_builder = partial(_get_component_from_path(base_model))
     embed_dim = model.head_dim * model.num_heads
     model.output = nn.Linear(embed_dim, num_classes, bias=False)
     return model
@@ -29,8 +29,6 @@ def lora_classifier_model(
     use_dora: bool = False,
     **model_kwargs,
 ):
-    if model_kwargs.get("apply_lora_to_output", False):
-        model_kwargs.pop("apply_lora_to_output")
     model = _get_component_from_path(base_model)(
         lora_rank=lora_rank,
         lora_alpha=lora_alpha,

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import math
 import os
 import sys
@@ -28,9 +29,6 @@ from torchtune.training import DummyProfiler, PROFILER_KEY
 from tqdm import tqdm
 
 log = utils.get_logger("DEBUG")
-import os
-
-import torch
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=True)
@@ -252,6 +250,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._setup_training_parameters(cfg)
         self._setup_training_hyperparameters(cfg)
 
+        self.cache_ctx_manager = lambda enable, *args, **kwargs: (
+            contextlib.nullcontext() if enable else local_kv_cache(*args, **kwargs)
+        )
         if self._compile:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
             self.generate_next_token = torch.compile(
@@ -733,9 +734,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if not self._optimizer_in_bwd:
                 policy_ckpt_dict[training.OPT_KEY] = self._optimizer.state_dict()
             else:
-                policy_ckpt_dict[training.OPT_KEY] = (
-                    self._optim_ckpt_wrapper.state_dict()
-                )
+                policy_ckpt_dict[
+                    training.OPT_KEY
+                ] = self._optim_ckpt_wrapper.state_dict()
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
@@ -917,7 +918,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 ]
                 context_length = batch_input_ids.shape[1]
                 # step 1: generate responses, and logits corresponding to the responses using the current policy
-                with local_kv_cache(
+                with self.cache_ctx_manager(
+                    self.enable_kv_cache,
                     self._policy_model,
                     batch_size=self._forward_batch_size,
                     dtype=self._dtype,
