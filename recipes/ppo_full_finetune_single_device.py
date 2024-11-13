@@ -122,7 +122,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             )
 
         # logging attributes
-        self._dtype = torch.float16
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
         self._log_peak_memory_stats = cfg.get("log_peak_memory_stats", False)
@@ -1157,13 +1156,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         loss /= self._gradient_accumulation_steps
+        loss.backward()
 
         with torch.no_grad():
             approx_policy_kls = (
                 0.5 * (pi_logprobs - trajectory.logprobs).pow(2)
             ).mean()
 
-        loss.backward()
         return PPOStats(
             loss,
             policy_loss / self._gradient_accumulation_steps,
@@ -1199,7 +1198,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             "approx_policy_kl": ppo_stats.approx_policy_kls.mean(),
             "response_lengths": trajectory.seq_lens.float().mean(),
             "tokens_per_second_per_gpu_trajectory": tokens_per_second_trajectory,
-            "tokens_per_second_per_gpu_loss": tokens_per_second_loss,
+            "tokens_per_second_per_gpu_ppo": tokens_per_second_loss,
         }
         if self._device.type == "cuda" and self._log_peak_memory_stats:
             log_dict.update(training.get_memory_stats(device=self._device))
