@@ -249,24 +249,22 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._setup_training_parameters(cfg)
         self._setup_training_hyperparameters(cfg)
 
-        self.cache_ctx_manager = lambda enable, *args, **kwargs: (
-            contextlib.nullcontext() if enable else local_kv_cache(*args, **kwargs)
+        self.cache_ctx_manager = lambda enable_kv_cache, *args, **kwargs: (
+            local_kv_cache(*args, **kwargs) if enable_kv_cache else contextlib.nullcontext() 
         )
         if self._compile:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
-            self.generate_next_token = torch.compile(
-                generation.generate_next_token,
-                backend=backend,
-                dynamic=False,
-                fullgraph=True,
-            )
+            if self.enable_kv_cache:
+                self.generate_next_token = torch.compile(
+                    generation.generate_next_token,
+                    backend=backend,
+                    dynamic=False,
+                    fullgraph=True,
+                )
             self.estimate_trajectory = torch.compile(
                 self.estimate_trajectory,
                 backend=backend,
                 fullgraph=True,
-            )
-            self._loss_fn = torch.compile(
-                self._loss_fn, backend=backend, fullgraph=True
             )
         else:
             self.generate_next_token = generation.generate_next_token

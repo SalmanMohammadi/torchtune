@@ -181,3 +181,27 @@ metric_logger:
   log_dir: ${output_dir}
 
 log_every_n_steps: 1
+
+profiler:
+  _component_: torchtune.training.setup_torch_profiler
+  enabled: True
+
+  #Output directory of trace artifacts
+  output_dir: ./target/160m/profiling_outputs
+
+  #`torch.profiler.ProfilerActivity` types to trace
+  cpu: True
+  cuda: True
+
+  #trace options passed to `torch.profiler.profile`
+  profile_memory: True
+  with_stack: False
+  record_shapes: False
+  with_flops: False
+
+  # `torch.profiler.schedule` options:
+  # wait_steps -> wait, warmup_steps -> warmup, active_steps -> active, num_cycles -> repeat
+  wait_steps: 0
+  warmup_steps: 0
+  active_steps: 2
+  num_cycles: 1
