@@ -31,7 +31,7 @@ from tqdm import tqdm
 log = utils.get_logger("DEBUG")
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=True)
+# torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=True)
 
 
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
@@ -957,14 +957,24 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             self._optimizer.zero_grad()
 
         training_completed = False
+        self._profiler.start()
         pbar = tqdm(total=self._total_steps, initial=self._steps_run)
         for curr_epoch in range(self._epochs_run, self._total_epochs):
             # Update the sampler to ensure data is correctly shuffled across epochs
             # in case shuffle is True
             self._sampler.set_epoch(curr_epoch)
 
-            self._profiler.start()
             for idx, batch in enumerate(self._dataloader):
+
+                # Start tracking CUDA memory for active steps for just the first epoch
+                if (
+                    curr_epoch == 0
+                    and self.profiler_profile_memory
+                    and idx == self.profiler_wait_steps + self.profiler_warmup_steps
+                ):
+                    torch.cuda.memory._record_memory_history()
+
+
                 batch = batch["tokens"].to(self._device)
                 _, context_length = batch.shape
                 num_tokens = batch.numel()
@@ -1068,9 +1078,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     + self.profiler_active_steps
                 ):
                     torch.cuda.memory._record_memory_history(enabled=None)
+
                 # Step the profiler
-                # Note we are stepping each batch, which might not include optimizer step in the trace
-                # if the schedule cycle doesn't align with gradient accumulation.
                 self._profiler.step()
 
                 if self._steps_run == self._total_steps:
