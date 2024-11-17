@@ -184,7 +184,7 @@ log_every_n_steps: 1
 
 profiler:
   _component_: torchtune.training.setup_torch_profiler
-  enabled: False
+  enabled: True
 
   #Output directory of trace artifacts
   output_dir: ./target/160m/profiling_outputs
@@ -202,6 +202,6 @@ profiler:
   # `torch.profiler.schedule` options:
   # wait_steps -> wait, warmup_steps -> warmup, active_steps -> active, num_cycles -> repeat
   wait_steps: 0
-  warmup_steps: 0
+  warmup_steps: 8
   active_steps: 2
   num_cycles: 1
