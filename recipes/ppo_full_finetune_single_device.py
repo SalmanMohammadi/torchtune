@@ -269,11 +269,11 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 backend=backend,
                 fullgraph=True,
             )
-            self.ppo_step = torch.compile(
-                self.ppo_step,
-                backend=backend,
-                fullgraph=True,
-            )
+            # self.ppo_step = torch.compile(
+            #     self.ppo_step,
+            #     backend=backend,
+            #     fullgraph=True,
+            # )
 
         if self._resume_from_checkpoint:
             self._update_recipe_state(policy_model_checkpoint_dict)
