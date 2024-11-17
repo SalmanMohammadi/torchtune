@@ -254,6 +254,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if enable_kv_cache
             else contextlib.nullcontext()
         )
+        self.generate_next_token = generation.generate_next_token
         if self._compile:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
             if self.enable_kv_cache:
@@ -273,8 +274,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 backend=backend,
                 fullgraph=True,
             )
-        else:
-            self.generate_next_token = generation.generate_next_token
 
         if self._resume_from_checkpoint:
             self._update_recipe_state(policy_model_checkpoint_dict)
@@ -1129,7 +1128,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         """
         # estimate logprobs from the policy at the current optimisation step
-        # with self.policy_act_ctx:
         pi_logits = self._policy_model(
             trajectory.query_responses,
             input_pos=trajectory.position_ids,
@@ -1144,7 +1142,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         del pi_logits
 
         # estimate the values from the value function at the current optimisation step
-        # with self.value_act_ctx:
         phi_values = self._value_model(
             trajectory.query_responses,
             input_pos=trajectory.position_ids,
