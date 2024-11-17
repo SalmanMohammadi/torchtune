@@ -31,7 +31,7 @@ from tqdm import tqdm
 log = utils.get_logger("DEBUG")
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-# torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=True)
+torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=True)
 
 
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
@@ -250,7 +250,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         self._setup_training_hyperparameters(cfg)
 
         self.cache_ctx_manager = lambda enable_kv_cache, *args, **kwargs: (
-            local_kv_cache(*args, **kwargs) if enable_kv_cache else contextlib.nullcontext() 
+            local_kv_cache(*args, **kwargs)
+            if enable_kv_cache
+            else contextlib.nullcontext()
         )
         if self._compile:
             backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
@@ -263,6 +265,11 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 )
             self.estimate_trajectory = torch.compile(
                 self.estimate_trajectory,
+                backend=backend,
+                fullgraph=True,
+            )
+            self.ppo_step = torch.compile(
+                self.ppo_step,
                 backend=backend,
                 fullgraph=True,
             )
@@ -797,7 +804,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             Trajectory: An instance of :class:`~torchtune.rlhf.Trajectory` comprising
                 the current trajectory.
         """
-
         batch_size = query_responses.shape[0]
         input_ids = query_responses[:, :context_length]
         responses = query_responses[:, context_length:].clone()
@@ -814,7 +820,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         del query_response_padding_masks
 
         # step 2. estimate logprobs of the responses using the current policy
-        logits = logits[:, context_length - 1 :]
+        # logits = logits[:, context_length - 1 :]
         logprobs = rlhf.logits_to_logprobs(logits, responses, self._temperature)
 
         del logits
@@ -972,7 +978,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 ):
                     torch.cuda.memory._record_memory_history()
 
-
                 batch = batch["tokens"].to(self._device)
                 _, context_length = batch.shape
                 num_tokens = batch.numel()
@@ -1038,6 +1043,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 returns[backward_batch_idxs],
                                 context_length,
                             )
+                            stats.loss.backward()
                             batch_ppo_stats.append(stats)
                             del batch_trajectory
 
@@ -1163,7 +1169,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         loss /= self._gradient_accumulation_steps
-        loss.backward()
+        # loss.backward()
 
         with torch.no_grad():
             approx_policy_kls = (
