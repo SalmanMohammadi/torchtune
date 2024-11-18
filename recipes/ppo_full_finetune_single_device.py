@@ -556,6 +556,27 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 value_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
             )
 
+
+        from contextlib import contextmanager
+
+        def create_context_manager(model):
+            orig_forwards = [mod.forward for mod in model.layers]
+
+            @contextmanager
+            def unwrap_model(model):
+                temp_forwards = [mod.forward for mod in model.layers]
+                try:
+                    for orig, layer in zip(orig_forwards, model.layers):
+                        layer.forward = orig
+                    yield
+                finally:
+                    for orig, layer in zip(temp_forwards, model.layers):
+                        layer.forward = orig
+            return unwrap_model
+        self.policy_act = create_context_manager(policy_model)
+        self.value_act = create_context_manager(value_model)
+
+
         policy_model.load_state_dict(policy_state_dict)
         ref_policy_model.load_state_dict(ref_policy_state_dict)
 
@@ -834,7 +855,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         del ref_logits
 
         # step 3. estimate values from the responses using the value function
-        values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
+        with self.value_act(self._value_model):
+            values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
         values = rlhf.truncate_sequence_for_logprobs(values, context_length).squeeze(-1)
 
         # step 4. replace any tokens in the responses after the first stop token (usually EOS token) with padding
@@ -928,7 +950,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     decoder_max_seq_len=self._tokenizer.max_seq_len
                     + self._max_generated_tokens,
                     device=self._device,
-                ):
+                ), self.policy_act(self._policy_model):
                     query_responses, logits = generation.generate(
                         model=self._policy_model,
                         prompt=batch_input_ids,
