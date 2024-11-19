@@ -120,7 +120,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             raise RuntimeError(
                 "full fp16 training is not supported with this recipe. Please use bf16 or fp32 instead."
             )
-        self._dtype = torch.float16
         # logging attributes
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
