@@ -120,7 +120,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             raise RuntimeError(
                 "full fp16 training is not supported with this recipe. Please use bf16 or fp32 instead."
             )
-
+        self._dtype = torch.float16
         # logging attributes
         self._output_dir = cfg.output_dir
         self._log_every_n_steps = cfg.get("log_every_n_steps", 1)
@@ -264,8 +264,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                     dynamic=False,
                     fullgraph=True,
                 )
-            self.estimate_trajectory = torch.compile(
-                self.estimate_trajectory,
+            # self.estimate_trajectory = torch.compile(
+            #     self.estimate_trajectory,
+            #     backend=backend,
+            #     fullgraph=True,
+            # )
+            self.estimate_values = torch.compile(
+                self.estimate_values,
                 backend=backend,
                 fullgraph=True,
             )
@@ -547,6 +552,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             ref_policy_model = config.instantiate(cfg_model)
             reward_model = config.instantiate(cfg_reward_value_model)
             value_model = config.instantiate(cfg_reward_value_model)
+        
+        if compile_model:
+            training.compile_model(ref_policy_model)
+            training.compile_model(reward_model)
 
         if enable_activation_checkpointing:
             training.set_activation_checkpointing(
@@ -782,6 +791,11 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "Are you sure you passed in the right recipe checkpoint?"
             )
 
+    def estimate_values(self, query_responses, position_ids, masks, context_length):
+        # # step 3. estimate values from the responses using the value function
+        values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
+        values = rlhf.truncate_sequence_for_logprobs(values, context_length).squeeze(-1)
+        return values
     def estimate_trajectory(
         self, query_responses, logits, context_length
     ) -> Trajectory:
@@ -833,10 +847,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         del ref_logits
 
-        # step 3. estimate values from the responses using the value function
-        values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
-        values = rlhf.truncate_sequence_for_logprobs(values, context_length).squeeze(-1)
-
+        # # step 3. estimate values from the responses using the value function
+        # values = self._value_model(query_responses, input_pos=position_ids, mask=masks)
+        # values = rlhf.truncate_sequence_for_logprobs(values, context_length).squeeze(-1)
+        values = self.estimate_values(query_responses, position_ids, masks, context_length)
         # step 4. replace any tokens in the responses after the first stop token (usually EOS token) with padding
         # resulting in truncated responses
         response_padding_masks, responses = rlhf.truncate_sequence_at_first_stop_token(
