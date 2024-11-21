@@ -737,9 +737,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if not self._optimizer_in_bwd:
                 policy_ckpt_dict[training.OPT_KEY] = self._optimizer.state_dict()
             else:
-                policy_ckpt_dict[
-                    training.OPT_KEY
-                ] = self._optim_ckpt_wrapper.state_dict()
+                policy_ckpt_dict[training.OPT_KEY] = (
+                    self._optim_ckpt_wrapper.state_dict()
+                )
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
@@ -855,7 +855,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # step 5.1 the scores from the reward model are the logits for the last non-padding token in
         # each (query, truncated-response) pair
         seq_lens = training.get_unmasked_sequence_lengths(response_padding_masks)
-        scores = scores[torch.arange(batch_size), seq_lens + context_length].squeeze(-1)
+        scores = scores.gather(1, (seq_lens + context_length).unsqueeze(1)).squeeze(-1)
+        # scores = scores[torch.arange(batch_size), seq_lens + context_length].squeeze(-1)
 
         # step 5.2 if configured, apply any penalties for sequences without EOS tokens
         # or shorter than a certain length
@@ -879,10 +880,13 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             seq_lens,
         )
         value_padding_masks = response_padding_masks.clone()
-        value_padding_masks[
-            torch.arange(batch_size, device=value_padding_masks.device),
-            value_seq_idxs,
-        ] = False
+        value_padding_masks = value_padding_masks.scatter_(
+            1, value_seq_idxs, torch.Tensor([True])
+        )
+        # value_padding_masks[
+        #     torch.arange(batch_size, device=value_padding_masks.device),
+        #     value_seq_idxs,
+        # ] = False
 
         values[value_padding_masks] = 0.0
 
