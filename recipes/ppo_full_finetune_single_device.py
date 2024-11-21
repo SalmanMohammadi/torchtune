@@ -116,10 +116,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # Disable for fp16, as we haven't validated "full" fp16 with this recipe, nor
         # enabled necessary features such as gradient scaling.
-        if self._dtype == torch.float16:
-            raise RuntimeError(
-                "full fp16 training is not supported with this recipe. Please use bf16 or fp32 instead."
-            )
+        # if self._dtype == torch.float16:
+        #     raise RuntimeError(
+        #         "full fp16 training is not supported with this recipe. Please use bf16 or fp32 instead."
+        #     )
 
         # logging attributes
         self._output_dir = cfg.output_dir
@@ -855,8 +855,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # step 5.1 the scores from the reward model are the logits for the last non-padding token in
         # each (query, truncated-response) pair
         seq_lens = training.get_unmasked_sequence_lengths(response_padding_masks)
-        scores = scores.gather(1, (seq_lens + context_length).unsqueeze(1)).squeeze(-1)
-        # scores = scores[torch.arange(batch_size), seq_lens + context_length].squeeze(-1)
+        scores = scores.gather(1, (seq_lens + context_length)[:, None, None]).squeeze((-1, -2))
 
         # step 5.2 if configured, apply any penalties for sequences without EOS tokens
         # or shorter than a certain length
@@ -881,13 +880,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
         value_padding_masks = response_padding_masks.clone()
         value_padding_masks = value_padding_masks.scatter_(
-            1, value_seq_idxs, torch.Tensor([True])
+            1, value_seq_idxs.unsqueeze(-1), False
         )
-        # value_padding_masks[
-        #     torch.arange(batch_size, device=value_padding_masks.device),
-        #     value_seq_idxs,
-        # ] = False
-
         values[value_padding_masks] = 0.0
 
         return Trajectory(
