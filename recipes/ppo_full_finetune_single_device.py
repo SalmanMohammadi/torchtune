@@ -548,6 +548,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             reward_model = config.instantiate(cfg_reward_value_model)
             value_model = config.instantiate(cfg_reward_value_model)
 
+        training.compile_model(policy_model)
+        training.compile_model(value_model)
+        
         if enable_activation_checkpointing:
             training.set_activation_checkpointing(
                 policy_model, auto_wrap_policy={modules.TransformerSelfAttentionLayer}
