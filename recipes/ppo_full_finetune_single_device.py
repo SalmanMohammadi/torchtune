@@ -617,9 +617,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             if not self._optimizer_in_bwd:
                 policy_ckpt_dict[training.OPT_KEY] = self._optimizer.state_dict()
             else:
-                policy_ckpt_dict[training.OPT_KEY] = (
-                    self._optim_ckpt_wrapper.state_dict()
-                )
+                policy_ckpt_dict[
+                    training.OPT_KEY
+                ] = self._optim_ckpt_wrapper.state_dict()
 
         self._policy_checkpointer.save_checkpoint(
             policy_ckpt_dict,
@@ -1045,7 +1045,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             "approx_policy_kl": ppo_stats.approx_policy_kls.mean(),
             "response_lengths": trajectory.seq_lens.float().mean(),
             "tokens_per_second_per_gpu_trajectory": tokens_per_second_trajectory,
-            "tokens_per_second_per_gpu_loss": tokens_per_second_loss,
+            "tokens_per_second_per_gpu_ppo": tokens_per_second_loss,
         }
         if self._device.type == "cuda" and self._log_peak_memory_stats:
             log_dict.update(training.get_memory_stats(device=self._device))
