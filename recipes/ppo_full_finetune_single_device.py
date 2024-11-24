@@ -979,17 +979,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 _, context_length = batch.shape
                 num_tokens = batch.numel()
 
-                # step 1. generate the trajectory using:
-                # - the current policy (pi_theta)
-                # - the current value function (V_phi)
-                # - the reference frozen policy model (pi_theta_0)
+                # step 1. generate the trajectory
                 t0_traj = time.perf_counter()
                 trajectory = self.generate_trajectory_batched(batch)
                 traj_time = time.perf_counter() - t0_traj
 
-                # step 2. get the rewards for the current trajectory. these are based on:
-                #   - the divergence between the current policy and the reference policy
-                #   - the scores from the reward model
+                # step 2. get the rewards for the current trajectory
                 rewards, kl, kl_rewards = rlhf.get_rewards_ppo(
                     trajectory.scores,
                     trajectory.logprobs,

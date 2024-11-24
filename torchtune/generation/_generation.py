@@ -189,7 +189,7 @@ def get_position_ids_from_padding_mask(
     return ((padding_mask.cumsum(-1) - 1) * padding_mask).to(torch.int)
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def generate(
     model: TransformerDecoder,
     prompt: torch.Tensor,
