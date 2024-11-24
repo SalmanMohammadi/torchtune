@@ -32,7 +32,9 @@ log = utils.get_logger("DEBUG")
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=True)
-
+torch._dynamo.config.cache_size_limit = 16
+torch._dynamo.config.force_parameter_static_shapes = False
+torch._dynamo.config.guard_nn_modules_using_dict_tags = False
 
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     """
@@ -255,25 +257,24 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             else contextlib.nullcontext()
         )
         self.generate_next_token = generation.generate_next_token
-        if self._compile:
-            backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
-            if self.enable_kv_cache:
-                self.generate_next_token = torch.compile(
-                    generation.generate_next_token,
-                    backend=backend,
-                    dynamic=False,
-                    fullgraph=True,
-                )
-            self.estimate_trajectory = torch.compile(
-                self.estimate_trajectory,
-                backend=backend,
-                fullgraph=True,
-            )
-            # self.ppo_step = torch.compile(
-            #     self.ppo_step,
-            #     backend=backend,
-            #     fullgraph=True,
-            # )
+        # if self._compile:
+        #     backend = os.environ.get("TORCH_COMPILE_BACKEND", "inductor")
+        #     if self.enable_kv_cache:
+        #         self.generate_next_token = torch.compile(
+        #             generation.generate_next_token,
+        #             backend=backend,
+        #             fullgraph=True,
+        #         )
+        #     self.estimate_trajectory = torch.compile(
+        #         self.estimate_trajectory,
+        #         backend=backend,
+        #         fullgraph=True,
+        #     )
+        #     # self.ppo_step = torch.compile(
+        #     #     self.ppo_step,
+        #     #     backend=backend,
+        #     #     fullgraph=True,
+        #     # )
 
         if self._resume_from_checkpoint:
             self._update_recipe_state(policy_model_checkpoint_dict)
@@ -547,6 +548,12 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             ref_policy_model = config.instantiate(cfg_model)
             reward_model = config.instantiate(cfg_reward_value_model)
             value_model = config.instantiate(cfg_reward_value_model)
+
+        if compile_model:
+            training.compile_model(policy_model)
+            training.compile_model(ref_policy_model)
+            training.compile_model(value_model)
+            training.compile_model(reward_model)
 
         if enable_activation_checkpointing:
             training.set_activation_checkpointing(
@@ -1035,7 +1042,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 returns[backward_batch_idxs],
                                 context_length,
                             )
-                            stats.loss.backward()
+                            # stats.loss.backward()
                             batch_ppo_stats.append(stats)
                             del batch_trajectory
 
@@ -1159,7 +1166,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         )
 
         loss /= self._gradient_accumulation_steps
-        # loss.backward()
+        loss.backward()
 
         with torch.no_grad():
             approx_policy_kls = (
