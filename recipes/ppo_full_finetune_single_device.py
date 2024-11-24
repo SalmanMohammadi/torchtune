@@ -36,6 +36,7 @@ torch._dynamo.config.cache_size_limit = 16
 torch._dynamo.config.force_parameter_static_shapes = False
 torch._dynamo.config.guard_nn_modules_using_dict_tags = False
 
+
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     """
     Full finetuning recipe for RLHF with PPO for dense transformer-based LLMs such as LLama2. This recipe is optimized
@@ -862,7 +863,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         # step 5.1 the scores from the reward model are the logits for the last non-padding token in
         # each (query, truncated-response) pair
         seq_lens = training.get_unmasked_sequence_lengths(response_padding_masks)
-        scores = scores.gather(1, (seq_lens + context_length)[:, None, None]).squeeze((-1, -2))
+        scores = scores.gather(1, (seq_lens + context_length)[:, None, None]).squeeze(
+            (-1, -2)
+        )
 
         # step 5.2 if configured, apply any penalties for sequences without EOS tokens
         # or shorter than a certain length
@@ -1036,14 +1039,22 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                                 )
                             )
                             # perform a backward pass using the current batch
-                            stats = self.ppo_step(
-                                batch_trajectory,
-                                advantages[backward_batch_idxs],
-                                returns[backward_batch_idxs],
-                                context_length,
-                            )
+                            # stats = self.ppo_step(
+                            #     batch_trajectory,
+                            #     advantages[backward_batch_idxs],
+                            #     returns[backward_batch_idxs],
+                            #     context_length,
+                            # )
                             # stats.loss.backward()
-                            batch_ppo_stats.append(stats)
+                            # batch_ppo_stats.append(stats)
+                            batch_ppo_stats.append(
+                                self.ppo_step(
+                                    batch_trajectory,
+                                    advantages[backward_batch_idxs],
+                                    returns[backward_batch_idxs],
+                                    context_length,
+                                )
+                            )
                             del batch_trajectory
 
                         ppo_stats.append(PPOStats(*map(sum, zip(*batch_ppo_stats))))
