@@ -31,7 +31,7 @@ from tqdm import tqdm
 log = utils.get_logger("DEBUG")
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=True)
+torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=False)
 torch._dynamo.config.cache_size_limit = 16
 torch._dynamo.config.force_parameter_static_shapes = False
 torch._dynamo.config.guard_nn_modules_using_dict_tags = False
