@@ -86,6 +86,7 @@ class TestLoRADPOSingleDeviceRecipe:
             metric_logger.filename={log_file} \
             enable_activation_checkpointing=True \
             enable_activation_offloading=False \
+            loss._component_=torchtune.rlhf.loss.SimPOLoss
         """.split()
 
         model_config = MODEL_TEST_CONFIGS["llama2_lora"]
@@ -119,6 +120,7 @@ class TestLoRADPOSingleDeviceRecipe:
             tokenizer.prompt_template=null \
             enable_activation_checkpointing=True \
             enable_activation_offloading=False \
+            loss._component_=torchtune.rlhf.loss.SimPOLoss
         """.split()
         cmd_2 = cmd_2 + self._get_test_config_overrides(epochs=3) + model_config
         monkeypatch.setattr(sys, "argv", cmd_2)
