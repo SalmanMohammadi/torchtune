@@ -137,7 +137,6 @@ optimizer:
 optimizer_in_bwd: True  # True saves memory. Requires gradient_accumulation_steps=1
 log_peak_memory_stats: True
 enable_activation_checkpointing: True # True reduces memory
-enable_activation_offloading: True
 enable_kv_cache: True
 
 # Reduced precision
@@ -201,7 +200,7 @@ profiler:
 
   # `torch.profiler.schedule` options:
   # wait_steps -> wait, warmup_steps -> warmup, active_steps -> active, num_cycles -> repeat
-  wait_steps: 7
-  warmup_steps: 0
+  wait_steps: 5
+  warmup_steps: 3
   active_steps: 3
   num_cycles: 1

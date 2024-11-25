@@ -33,8 +33,6 @@ log = utils.get_logger("DEBUG")
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 torch._logging.set_logs(recompiles=True, graph_breaks=True, perf_hints=False)
 torch._dynamo.config.cache_size_limit = 16
-torch._dynamo.config.force_parameter_static_shapes = False
-torch._dynamo.config.guard_nn_modules_using_dict_tags = False
 
 
 class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
@@ -42,8 +40,8 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
     Full finetuning recipe for RLHF with PPO for dense transformer-based LLMs such as LLama2. This recipe is optimized
     for single GPU training. Training on CPU is not supported.
 
-    This implementation is based on `Learning to summarize from human feedback <https://arxiv.org/abs/2009.01325>`_ and
-    `Training a Helpful and Harmless Assistant with Reinforcement Learning from Human Feedback <https://arxiv.org/abs/2204.05862>`_.
+    This implementation is based on "Learning to summarize from human feedback" (https://arxiv.org/abs/2009.01325) and
+    "Training a Helpful and Harmless Assistant with Reinforcement Learning from Human Feedback" (https://arxiv.org/abs/2204.05862>).
 
     Features:
         - Activation Checkpointing. This can be controlled using the ``activation_checkpointing``
@@ -119,10 +117,10 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         # Disable for fp16, as we haven't validated "full" fp16 with this recipe, nor
         # enabled necessary features such as gradient scaling.
-        # if self._dtype == torch.float16:
-        #     raise RuntimeError(
-        #         "full fp16 training is not supported with this recipe. Please use bf16 or fp32 instead."
-        #     )
+        if self._dtype == torch.float16:
+            raise RuntimeError(
+                "full fp16 training is not supported with this recipe. Please use bf16 or fp32 instead."
+            )
 
         # logging attributes
         self._output_dir = cfg.output_dir
@@ -135,23 +133,9 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             )
             self._log_peak_memory_stats = False
 
-        # activation checkpointing/offloading
+        # activation checkpointing
         self.enable_activation_checkpointing = cfg.enable_activation_checkpointing
-        self.enable_activation_offloading = cfg.enable_activation_offloading
-        if self.enable_activation_offloading:
-            if self._device.type != "cuda":
-                raise RuntimeError(
-                    "enable_activation_offloading should only be True when training on CUDA"
-                )
-            if not self.enable_activation_checkpointing:
-                raise RuntimeError(
-                    "enable_activation_offloading should only be True when enable_activation_checkpointing is True"
-                )
-        elif self.enable_activation_checkpointing:
-            log.info(
-                "Hint: enable_activation_checkpointing is True, but enable_activation_offloading isn't. "
-                "Enabling activation offloading should reduce memory further."
-            )
+    
         # These are public properties which are updated by the checkpoint loader
         # when ``resume_from_checkpoint`` is `True` or validated in tests
         self.seed = training.set_seed(seed=cfg.seed)
@@ -214,7 +198,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
             cfg_model=cfg.policy_model,
             cfg_reward_value_model=cfg.reward_and_value_model,
             enable_activation_checkpointing=self.enable_activation_checkpointing,
-            enable_activation_offloading=self.enable_activation_offloading,
             compile_model=self._compile,
             policy_state_dict=policy_model_checkpoint_dict[training.MODEL_KEY],
             ref_policy_state_dict=ref_policy_state_dict[training.MODEL_KEY],
@@ -522,7 +505,6 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
         cfg_model: DictConfig,
         cfg_reward_value_model: DictConfig,
         enable_activation_checkpointing: bool,
-        enable_activation_offloading: bool,
         compile_model: bool,
         policy_state_dict: Dict[str, Any],
         ref_policy_state_dict: Dict[str, Any],
@@ -779,13 +761,15 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 "Are you sure you passed in the right recipe checkpoint?"
             )
 
-    def estimate_trajectory(
+    def generate_trajectory(
         self, input_ids
     ) -> Trajectory:
         """
-        Estimates logprobs, rewards, and values over a given trajectory. This is done over the following steps:
-        
-        1. Generate responses, and logits corresponding to the responses using the current policy
+        Generates a trajectory given the current policy and value models, the reference policy model, the reward model,
+        and batch of inputs. This is done over the following steps:
+
+        1: Generate responses, and logits corresponding to the responses using the current policy,
+            generating (query, response) pairs.
         2. Estimate logprobs of the generated responses using the current policy.
         3. Estimate values from the generated responses using the current value function.
         4. Replace any tokens in the response after the first stop token (usually EOS token) with padding,
@@ -928,7 +912,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
                 ]
 
                 trajectories.append(
-                    self.estimate_trajectory(batch_input_ids)
+                    self.generate_trajectory(batch_input_ids)
                 )
         return Trajectory(*map(torch.cat, zip(*trajectories)))
 
