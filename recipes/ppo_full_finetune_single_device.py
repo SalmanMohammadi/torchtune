@@ -1112,6 +1112,7 @@ class PPOFullFinetuneRecipeSingleDevice(FTRecipeInterface):
 
         self._profiler.stop()
 
+    @torch.compiler.disable()
     def ppo_step(
         self,
         trajectory: Trajectory,
