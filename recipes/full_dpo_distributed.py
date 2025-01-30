@@ -11,9 +11,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from warnings import warn
 
 import torch
+import torch.distributed as dist
 from omegaconf import DictConfig, ListConfig
 from torch import nn
 from torch.distributed import destroy_process_group, init_process_group
+from torch.distributed.tensor.parallel import parallelize_module
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from torchtune import config, modules, rlhf, training, utils
@@ -22,9 +24,9 @@ from torchtune.datasets import ConcatDataset
 from torchtune.recipe_interfaces import FTRecipeInterface
 from torchtune.training import DummyProfiler, PROFILER_KEY
 from torchtune.training.activations import apply_selective_activation_checkpointing
-from torchtune.training.checkpointing._checkpoint_client import CheckpointClient
 from torchtune.utils import get_world_size_and_rank
 from tqdm import tqdm
+
 
 log = utils.get_logger("DEBUG")
 
@@ -140,7 +142,6 @@ class FullDPORecipeDistributed(FTRecipeInterface):
         self._gradient_accumulation_steps = cfg.gradient_accumulation_steps
         self._optimizer_in_bwd = cfg.get("optimizer_in_bwd", False)
         self._clip_grad_norm = cfg.get("clip_grad_norm", None)
-        self._checkpoint_client = CheckpointClient(cfg)
 
         # Optimizer in backward is not compatible with gradient accumulation or gradient clipping
         if self._optimizer_in_bwd:
@@ -189,14 +190,14 @@ class FullDPORecipeDistributed(FTRecipeInterface):
         self.max_steps_per_epoch = cfg.max_steps_per_epoch
         self.global_step = 0
 
-    def load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
+    def _load_checkpoint(self, cfg_checkpointer: DictConfig) -> Dict[str, Any]:
         """
         Extract the checkpoint state from file and validate. If resume_from_checkpoint
         is True, this also includes the recipe state.
         """
         self._checkpointer = config.instantiate(
             cfg_checkpointer,
-            resume_from_checkpoint=self._resume_from_checkpoint,
+            should_load_recipe_state=self._resume_from_checkpoint,
         )
         checkpoint_dict = self._checkpointer.load_checkpoint()
 
@@ -204,12 +205,13 @@ class FullDPORecipeDistributed(FTRecipeInterface):
             self._update_recipe_state(checkpoint_dict)
         return checkpoint_dict
 
-    def load_ref_states(self, cfg_ref_checkpointer: DictConfig) -> Dict[str, Any]:
+    def _load_ref_checkpoint(self, cfg_ref_checkpointer: DictConfig) -> Dict[str, Any]:
         """
-        Extract the checkpoint state from file and validate. If resume_from_checkpoint
-        is True, this also includes the recipe state.
+        Extract the reference checkpoint state from file.
         """
-        _ref_checkpointer = config.instantiate(cfg_ref_checkpointer)
+        _ref_checkpointer = config.instantiate(
+            cfg_ref_checkpointer, should_load_recipe_state=False
+        )
         checkpoint_dict = _ref_checkpointer.load_checkpoint()
         return checkpoint_dict[training.MODEL_KEY]
 
@@ -265,7 +267,8 @@ class FullDPORecipeDistributed(FTRecipeInterface):
             self._metric_logger.log_config(cfg)
 
         # Load the base model
-        checkpoint_dict = self._checkpoint_client.load_base_checkpoint()
+        checkpoint_dict = self._load_checkpoint(cfg.checkpointer)
+        ref_checkpoint_dict = self._load_ref_checkpoint(cfg.ref_checkpointer)
 
         self._compile = cfg.get("compile", False)
         self._model = self._setup_model(
@@ -279,13 +282,20 @@ class FullDPORecipeDistributed(FTRecipeInterface):
             ac_mode=cfg.get("ac_mode", None),
             ac_option=cfg.get("ac_option", None),
         )
-        self._ref_model = self._setup_reference_model(
-            cfg_model=cfg.model,
-            custom_sharded_layers=cfg.get("custom_sharded_layers", None),
-            fsdp_cpu_offload=cfg.get("fsdp_cpu_offload", False),
-            reshard_after_forward=cfg.get("fsdp_reshard_after_forward", True),
-            model_state_dict=self.load_ref_states(cfg.ref_checkpointer),
-        )
+        if not cfg.get("ref_model_tp", False):
+            self._ref_model = self._setup_reference_model(
+                cfg_model=cfg.model,
+                custom_sharded_layers=cfg.get("custom_sharded_layers", None),
+                fsdp_cpu_offload=cfg.get("fsdp_cpu_offload", False),
+                reshard_after_forward=cfg.get("fsdp_reshard_after_forward", True),
+                model_state_dict=ref_checkpoint_dict,
+            )
+        else:
+            self._ref_model = self._setup_tp_ref_model(
+                cfg_model=cfg.model,
+                model_state_dict=ref_checkpoint_dict,
+                parallelize_plan=cfg.ref_model_parallelize_plan
+            )
         self._ref_model.eval()
         for p in self._ref_model.parameters():
             p.requires_grad = False
@@ -525,6 +535,66 @@ class FullDPORecipeDistributed(FTRecipeInterface):
 
         return model
 
+    def _setup_tp_ref_model(self, cfg_model, model_state_dict, parallelize_plan):
+
+        utils.log_rank_zero(
+            log,
+            "TP is enabled. Instantiating reference model and loading checkpoint on Rank 0 ...",
+        )
+        init_start = time.perf_counter()
+
+        with training.set_default_dtype(self._dtype), torch.device("meta"):
+            model = config.instantiate(cfg_model)
+
+        if self._compile:
+            training.compile_model(model, verbose=self._is_rank_zero)
+
+        # let's shard the model
+        # Set up tensor parallel device mesh
+        tp_degree = dist.get_world_size()  # Using all GPUs for TP
+        tp_mesh_shape = (tp_degree,)
+        tp_device_mesh = dist.init_device_mesh("cuda", tp_mesh_shape)
+
+        # Use the local number (num_heads, num_kv_heads, embed_dim) to account for tensor paralell
+        training.prepare_mha_for_tp(model, tp_device_mesh)
+        parallelize_module(
+            model,
+            tp_device_mesh,
+            parallelize_plan=config.instantiate(parallelize_plan),
+        )
+        # init rope
+        with training.set_default_dtype(self._dtype), self._device:
+            for m in model.modules():
+                # RoPE is not covered in state dict
+                if hasattr(m, "rope_init"):
+                    m.rope_init()
+        # then load from state dict
+        # dict and load into the model
+        training.load_from_full_model_state_dict(
+            model=model,
+            full_sd=model_state_dict,
+            device=self._device,
+            strict=True,
+            cpu_offload=cfg_model.get("ref_model_cpu_offload", False),
+        )
+
+        # Ensure no params and buffers are on meta device
+        training.validate_no_params_on_meta_device(model)
+
+        utils.log_rank_zero(
+            log,
+            f"Instantiating model and loading checkpoint took {time.perf_counter() - init_start:.2f} secs",
+        )
+
+        if self._is_rank_zero:
+            memory_stats = training.get_memory_stats(device=self._device)
+            training.log_memory_stats(memory_stats)
+
+        # synchronize before training begins
+        torch.distributed.barrier()
+
+        return model
+
     def _setup_reference_model(
         self,
         cfg_model: DictConfig,
@@ -540,6 +610,11 @@ class FullDPORecipeDistributed(FTRecipeInterface):
            b. All ranks calls ``load_state_dict`` without peaking CPU RAMs since
               full state dicts are loaded with ``torch.load(mmap=True)``
         """
+        utils.log_rank_zero(
+            log,
+            f"Using FSDP for ref model",
+        )
+
         return self._setup_model(
             cfg_model,
             False,
@@ -952,7 +1027,7 @@ def recipe_main(cfg: DictConfig) -> None:
             "If using tune CLI, please specify --nnodes 1 and --nproc_per_node [num_gpus]"
         )
 
-    init_process_group("cuda:nccl,cpu:gloo")
+    init_process_group("nccl")
     if cfg.get("fsdp_cpu_offload", False):
         # Utilize all available CPU cores for intra-op parallelism. This provides ~2x
         # speed up when benchmarking fused AdamW on CPU

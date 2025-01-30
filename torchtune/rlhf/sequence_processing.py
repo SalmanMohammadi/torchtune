@@ -124,7 +124,10 @@ def get_batch_log_probs(
     Raises:
         ValueError: If logits and labels have different shapes.
     """
-
+    # torch.distributed.all_reduce(logits)
+    # torch.distributed.all_reduce(labels)
+    print(logits.shape[:-1], labels.shape)
+    #logits.shape[-1], labels.shape, logits.shape[-1] != labels.shape)
     if logits.shape[:-1] != labels.shape:
         raise ValueError(
             "Logits (batch and sequence length dim) and labels must have the same shape."

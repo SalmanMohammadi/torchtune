@@ -119,16 +119,20 @@ class TransformerSelfAttentionLayer(nn.Module):
         # [b, s, d]
         # Norm applied before self-attention
         h = self.sa_norm(x)
+        print("Start", "=" * 80)
+        print("X", x.shape, x.device)
+        print("H", h.shape, h.device)
         attn_out = self.attn(h, h, mask=mask, input_pos=input_pos)
-
+        print("Attn_out", attn_out.shape, attn_out.device)
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         h = self.sa_scale(attn_out) + x
 
         # Norm applied before the feedforward layer
         mlp_out = self.mlp(self.mlp_norm(h))
-
+        print("MLP_out", mlp_out.shape, mlp_out.device)
         # Residual connection; shape: [batch_size, seq_length, embed_dim]
         out = h + self.mlp_scale(mlp_out)
+        print("End", "=" * 80)
         return out
 
 
