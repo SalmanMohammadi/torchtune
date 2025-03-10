@@ -41,7 +41,7 @@ class TestClassifierModelBuilder:
             (1, 256, 256, 1, 110.2561),
         ],
     )
-    def test_forward_component_builders(
+    def test_forward_classifier_model(
         self,
         base_model_path: str,
         bsz: int,
