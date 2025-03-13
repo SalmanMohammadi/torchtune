@@ -47,7 +47,7 @@ policy_model:
 # because our reward model checkpoint has a larger vocabulary size (due to an added padding token)
 reward_and_value_model:
   _component_: torchtune.models.common.classifier_model
-  base_model: torchtune.models.mistral.mistral_7b
+  base_model_path: torchtune.models.mistral.mistral_7b
   num_classes: 1
   vocab_size: 32001
   num_layers: 32
