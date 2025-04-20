@@ -674,11 +674,20 @@ class TransformerDecoder(nn.Module):
     def unembed(self, h):
         # shape: [b, s, d]
         h = self.norm(h)
-
-        if self.num_output_chunks > 0:
+        if self.skip_output_layer:
+            return h
+        elif self.num_output_chunks > 0:
             output = self.chunked_output(h)
         else:
             # shape: [b, seq_len, out_dim]
             output = self.output(h).float()
 
         return output
+
+    def get_output_weight(self) -> torch.Tensor:
+        """Returns the output weight matrix."""
+        return self.output.weight
+
+    def set_skip_output_layer(self, skip: bool) -> None:
+        """Set whether to skip output layer and return hidden states."""
+        self.skip_output_layer = skip
